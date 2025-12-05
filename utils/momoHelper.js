@@ -43,11 +43,10 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
     if (currency !== "RWF") {
       console.warn(`Currency ${currency} not supported by Lanari Pay, converting to RWF`);
       
-      // Convert to RWF
       const exchangeRates = {
-        USD: 1200, // 1 USD ≈ 1200 RWF
-        EUR: 1300, // 1 EUR ≈ 1300 RWF
-        GBP: 1500, // 1 GBP ≈ 1500 RWF
+        USD: 1200,
+        EUR: 1300,
+        GBP: 1500,
       };
       
       if (exchangeRates[currency]) {
@@ -66,14 +65,12 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
 
     // Ensure it's a Rwanda number in correct format
     if (cleanPhone.startsWith('0')) {
-      // Convert 07xxxxxxxx to 07xxxxxxxx
       cleanPhone = '0' + cleanPhone.substring(1);
     } else if (!cleanPhone.startsWith('0')) {
-      // Add country code if missing
       cleanPhone = '0' + cleanPhone;
     }
 
-    // Validate phone number length (should be 10 digits for Rwanda: 0XXXXXXXXX)
+    // Validate phone number length
     if (cleanPhone.length !== 10) {
       return {
         success: false,
@@ -81,27 +78,27 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
       };
     }
 
-    // Amount should be integer for RWF (no decimals)
+    // Amount should be integer for RWF
     const amountInRwf = Math.round(amount);
 
     // Validate minimum amount
-    if (amountInRwf < 100) {
+    if (amountInRwf < 5) {
       return {
         success: false,
         error: `Amount too low. Minimum payment is 100 RWF, got ${amountInRwf} RWF`,
       };
     }
 
-    // Prepare request payload according to Lanari Pay documentation
+    // Prepare request payload
     const payload = {
       api_key: lanariPayConfig.apiKey,
       api_secret: lanariPayConfig.apiSecret,
       amount: amountInRwf,
       customer_phone: cleanPhone,
       currency: "RWF",
-      payment_method: "mobile_money", // REQUIRED by Lanari Pay
+      payment_method: "mobile_money",
       description: description || "Payment",
-      customer_email: "", // Optional, you can pass user email if available
+      customer_email: "",
     };
 
     console.log("📤 Sending Request to Lanari Pay:", {
@@ -113,7 +110,6 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
       },
     });
 
-    // Send credentials in body (as per documentation)
     const response = await axios.post(
       lanariPayConfig.processUrl,
       payload,
@@ -122,8 +118,7 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
           "Content-Type": "application/json",
           "Accept": "application/json",
         },
-        timeout: 30000, // 30 second timeout
-        validateStatus: (status) => status < 500, // Don't throw on 4xx errors
+        validateStatus: (status) => status < 500,
       }
     );
 
@@ -134,8 +129,20 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
 
     const responseData = response.data;
     
+    // 🔥 CHECK GATEWAY RESPONSE STATUS - THIS IS THE KEY FIX!
+    const gatewayStatus = responseData.gateway_response?.data?.status;
+    const isGatewaySuccessful = gatewayStatus === "SUCCESSFUL";
+    
+    console.log("🔍 Checking Gateway Status:", {
+      outerStatus: responseData.status,
+      gatewayStatus: gatewayStatus,
+      isGatewaySuccessful: isGatewaySuccessful,
+    });
+
     // Check if the response indicates success
+    // 🔥 PRIORITIZE GATEWAY RESPONSE STATUS
     const isSuccess = 
+      isGatewaySuccessful || // Check gateway status first!
       responseData.success === true || 
       responseData.status === "success" || 
       (responseData.transaction_ref && responseData.status !== "failed");
@@ -144,25 +151,27 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
       return {
         success: true,
         referenceId: 
-          responseData.transaction_ref || 
-          responseData.transaction_id || 
-          responseData.reference_id || 
+          responseData.transaction_ref ||
+          responseData.transaction_id ||
+          responseData.reference_id ||
           responseData.id,
-        status: responseData.status || 'pending',
-        message: responseData.message || 'Payment initiated successfully',
+        status: isGatewaySuccessful ? 'success' : (responseData.status || 'pending'),
+        gatewayStatus: gatewayStatus, // 🔥 Include gateway status
+        isGatewaySuccessful: isGatewaySuccessful, // 🔥 Flag for immediate processing
+        message: isGatewaySuccessful 
+          ? 'Payment successful' 
+          : (responseData.message || 'Payment initiated successfully'),
         data: responseData,
         amount: amountInRwf,
         currency: "RWF",
         phoneNumber: cleanPhone,
       };
     } else {
-      // Extract detailed error information
       const errorMessage = 
         responseData.message || 
         responseData.error || 
         responseData.gateway_response?.data?.message ||
         'Payment initiation failed';
-      
       const errorDetails = {
         message: errorMessage,
         statusCode: response.status,
@@ -188,7 +197,6 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
       code: error.code,
     });
     
-    // Provide more specific error messages
     let errorMessage = "Failed to send payment request";
     
     if (error.code === 'ECONNREFUSED') {
@@ -212,7 +220,6 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
     };
   }
 };
-
 /**
  * Check payment status from Lanari Pay
  */
@@ -240,7 +247,6 @@ export const checkPaymentStatus = async (referenceId) => {
         headers: {
           "Accept": "application/json",
         },
-        timeout: 10000,
         validateStatus: (status) => status < 500,
       }
     );
@@ -339,7 +345,6 @@ export const sendMoneyToRecipient = async (amount, phoneNumber, externalId, desc
           "Content-Type": "application/json",
           "Accept": "application/json",
         },
-        timeout: 30000,
         validateStatus: (status) => status < 500,
       }
     );
@@ -413,7 +418,6 @@ export const verifyAccountActive = async (phoneNumber) => {
           "Content-Type": "application/json",
           "Accept": "application/json",
         },
-        timeout: 10000,
         validateStatus: (status) => status < 500,
       }
     );
@@ -457,7 +461,6 @@ export const getAccountBalance = async () => {
           "X-API-Secret": lanariPayConfig.apiSecret,
           "Accept": "application/json",
         },
-        timeout: 10000,
       }
     );
 
@@ -499,7 +502,6 @@ export const getTransactions = async (limit = 50, offset = 0, status = null) => 
         headers: {
           "Accept": "application/json",
         },
-        timeout: 10000,
       }
     );
 

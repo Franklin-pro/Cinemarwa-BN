@@ -4,14 +4,13 @@ import Payment from "../models/Payment.model.js";
 import Movie from "../models/Movie.model.js";
 import User from "../models/User.modal.js";
 import Joi from "joi";
+import Withdrawal from "../models/withdrawal.js";
 
 // ====== PAYMENT DISTRIBUTION CONFIGURATION ======
 
 const FILMMAKER_SHARE = parseFloat(process.env.FILMMAKER_SHARE_PERCENTAGE) || 70;
 const ADMIN_SHARE = parseFloat(process.env.ADMIN_SHARE_PERCENTAGE) || 30;
 const ADMIN_MOMO_NUMBER = process.env.ADMIN_MOMO_NUMBER || "0790019543";
-
-
 
 // ====== VALIDATION SCHEMAS ======
 
@@ -26,9 +25,6 @@ const paymentValidationSchema = Joi.object({
   description: Joi.string().max(500),
   filmmakersAmount: Joi.number().positive().optional(),
   adminAmount: Joi.number().positive().optional(),
-
-
-  
 });
 
 // ====== HELPER FUNCTIONS ======
@@ -62,7 +58,6 @@ const grantMovieAccess = async (payment) => {
     }
 
     if (payment.type === 'watch') {
-      // Grant 48-hour watch access
       const expiresAt = new Date();
       expiresAt.setHours(expiresAt.getHours() + 48);
 
@@ -74,7 +69,6 @@ const grantMovieAccess = async (payment) => {
         transactionId: payment.id,
       });
     } else if (payment.type === 'download') {
-      // Grant permanent download access
       user.downloads = user.downloads || [];
       user.downloads.push({
         movie: movie.id,
@@ -85,11 +79,9 @@ const grantMovieAccess = async (payment) => {
 
     await user.save();
 
-    // Update movie statistics
     movie.totalViews = (movie.totalViews || 0) + 1;
     movie.totalRevenue = (movie.totalRevenue || 0) + payment.amount;
     await movie.save();
-
 
     return { success: true };
   } catch (error) {
@@ -112,7 +104,6 @@ const updateFilmmakerRevenue = async (movieId, filmmakerAmount, totalAmount) => 
     movie.totalRevenue = (movie.totalRevenue || 0) + totalAmount;
     await movie.save();
 
-    // Update filmmaker stats
     const filmmaker = await User.findByPk(movie.filmmakerId);
     if (filmmaker) {
       filmmaker.filmmmakerFinancePendingBalance =
@@ -122,13 +113,424 @@ const updateFilmmakerRevenue = async (movieId, filmmakerAmount, totalAmount) => 
         (filmmaker.filmmmakerStatsTotalRevenue || 0) + filmmakerAmount;
 
       await filmmaker.save();
-
     }
   } catch (error) {
     console.error('❌ Error updating filmmaker revenue:', error);
   }
 };
 
+/**
+ * 🔥 NEW: Process automatic withdrawals to filmmaker and admin
+ */
+const processAutomaticWithdrawals = async (payment, movie) => {
+  try {
+    console.log("💸 Starting automatic withdrawals for payment:", payment.id);
+
+    const filmmaker = await User.findByPk(movie.filmmakerId);
+    if (!filmmaker) {
+      console.error('❌ Filmmaker not found');
+      return { success: false, error: 'Filmmaker not found' };
+    }
+
+    const filmmakerMoMoNumber = filmmaker.filmmmakerMomoPhoneNumber;
+    if (!filmmakerMoMoNumber) {
+      console.warn('⚠️ Filmmaker has no MoMo number configured');
+      return { success: false, error: 'Filmmaker MoMo number not configured' };
+    }
+
+    const distribution = calculatePaymentDistribution(payment.amount);
+
+    // 🔥 CREATE WITHDRAWAL RECORDS
+    const filmmakerWithdrawal = await Withdrawal.create({
+      userId: filmmaker.id,
+      amount: distribution.filmmakerAmount,
+      currency: payment.currency || 'RWF',
+      phoneNumber: filmmakerMoMoNumber,
+      status: 'processing',
+      paymentId: payment.id,
+      type: 'filmmaker_earning',
+      description: `Earnings: ${payment.type} - ${movie.title}`,
+      metadata: {
+        movieId: movie.id,
+        movieTitle: movie.title,
+        paymentType: payment.type,
+        customerPaymentId: payment.id,
+      },
+    });
+
+    const adminWithdrawal = await Withdrawal.create({
+      userId: payment.userId, // Track who triggered this admin fee
+      amount: distribution.adminAmount,
+      currency: payment.currency || 'RWF',
+      phoneNumber: ADMIN_MOMO_NUMBER,
+      status: 'processing',
+      paymentId: payment.id,
+      type: 'admin_fee',
+      description: `Platform Fee: ${payment.type} - ${movie.title}`,
+      metadata: {
+        movieId: movie.id,
+        movieTitle: movie.title,
+        paymentType: payment.type,
+        customerPaymentId: payment.id,
+      },
+    });
+
+    console.log("📝 Withdrawal records created:", {
+      filmmaker: filmmakerWithdrawal.id,
+      admin: adminWithdrawal.id,
+    });
+
+    // 🔥 PROCESS FILMMAKER PAYOUT
+    console.log("💰 Processing filmmaker payout...");
+    const filmmakerPayout = await sendMoneyToRecipient(
+      distribution.filmmakerAmount,
+      filmmakerMoMoNumber,
+      `filmmaker_${payment.id}`,
+      `Earnings: ${payment.type} - ${movie.title}`
+    );
+
+    if (filmmakerPayout.success) {
+      filmmakerWithdrawal.status = 'completed';
+      filmmakerWithdrawal.referenceId = filmmakerPayout.referenceId;
+      filmmakerWithdrawal.transactionId = filmmakerPayout.data?.transaction_id;
+      filmmakerWithdrawal.completedAt = new Date();
+      await filmmakerWithdrawal.save();
+
+      // Update filmmaker balance
+      filmmaker.filmmmakerFinancePendingBalance =
+        Math.max(0, (filmmaker.filmmmakerFinancePendingBalance || 0) - distribution.filmmakerAmount);
+      filmmaker.filmmmakerFinanceAvailableBalance =
+        (filmmaker.filmmmakerFinanceAvailableBalance || 0) + distribution.filmmakerAmount;
+      await filmmaker.save();
+
+      console.log("✅ Filmmaker payout successful:", filmmakerPayout.referenceId);
+    } else {
+      filmmakerWithdrawal.status = 'failed';
+      filmmakerWithdrawal.failureReason = filmmakerPayout.error;
+      await filmmakerWithdrawal.save();
+      console.error("❌ Filmmaker payout failed:", filmmakerPayout.error);
+    }
+
+    // 🔥 PROCESS ADMIN PAYOUT
+    console.log("💰 Processing admin payout...");
+    const adminPayout = await sendMoneyToRecipient(
+      distribution.adminAmount,
+      ADMIN_MOMO_NUMBER,
+      `admin_${payment.id}`,
+      `Platform Fee: ${payment.type} - ${movie.title}`
+    );
+
+    if (adminPayout.success) {
+      adminWithdrawal.status = 'completed';
+      adminWithdrawal.referenceId = adminPayout.referenceId;
+      adminWithdrawal.transactionId = adminPayout.data?.transaction_id;
+      adminWithdrawal.completedAt = new Date();
+      await adminWithdrawal.save();
+      console.log("✅ Admin payout successful:", adminPayout.referenceId);
+    } else {
+      adminWithdrawal.status = 'failed';
+      adminWithdrawal.failureReason = adminPayout.error;
+      await adminWithdrawal.save();
+      console.error("❌ Admin payout failed:", adminPayout.error);
+    }
+
+    return {
+      success: true,
+      filmmaker: {
+        withdrawalId: filmmakerWithdrawal.id,
+        status: filmmakerWithdrawal.status,
+        amount: distribution.filmmakerAmount,
+        referenceId: filmmakerWithdrawal.referenceId,
+      },
+      admin: {
+        withdrawalId: adminWithdrawal.id,
+        status: adminWithdrawal.status,
+        amount: distribution.adminAmount,
+        referenceId: adminWithdrawal.referenceId,
+      },
+    };
+  } catch (error) {
+    console.error('❌ Error processing automatic withdrawals:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// ====== PAYMENT ENDPOINTS ======
+
+/**
+ * 🔥 UPDATED: Process MoMo Payment with Automatic Withdrawals
+ * POST /api/payments/momo
+ */
+export const payWithMoMo = async (req, res) => {
+  try {
+    const { error, value } = paymentValidationSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation error",
+        error: error.details.map((d) => d.message).join(", "),
+      });
+    }
+
+    const { amount, phoneNumber, userId, movieId, description, currency, type } = value;
+
+    console.log("📱 Payment Request Received:", {
+      amount,
+      currency,
+      phoneNumber,
+      movieId,
+      type,
+      userId
+    });
+
+    const movie = await Movie.findByPk(movieId);
+    if (!movie) {
+      return res.status(404).json({ 
+        success: false,
+        message: "Movie not found" 
+      });
+    }
+
+    const distribution = calculatePaymentDistribution(amount);
+
+    let finalAmount = amount;
+    let finalCurrency = currency;
+    
+    if (currency !== "RWF") {
+      console.log(`Converting ${currency} ${amount} to RWF`);
+      const exchangeRates = {
+        USD: 1200,
+        EUR: 1300,
+        GBP: 1500,
+      };
+      
+      if (exchangeRates[currency]) {
+        finalAmount = Math.round(amount * exchangeRates[currency]);
+        finalCurrency = "RWF";
+        console.log(`Converted to: ${finalAmount} RWF`);
+      }
+    }
+
+    let formattedPhone = phoneNumber.replace(/[+\s]/g, '');
+    if (formattedPhone.startsWith("0")) {
+      formattedPhone = "0" + formattedPhone.substring(1);
+    } else if (!formattedPhone.startsWith("0")) {
+      formattedPhone = "0" + formattedPhone;
+    }
+
+    const payment = await requestToPay(
+      finalAmount,
+      formattedPhone,
+      userId,
+      description || `${type.charAt(0).toUpperCase() + type.slice(1)} ${movie.title}`,
+      finalCurrency
+    );
+
+    console.log("📱 Lanari Pay Response:", payment);
+
+    if (payment.success) {
+      const gatewayStatus = payment.data?.gateway_response?.data?.status;
+      const isGatewaySuccessful = gatewayStatus === "SUCCESSFUL";
+      
+      console.log("🔍 Gateway Response Status:", gatewayStatus);
+      console.log("✅ Is Gateway Successful?", isGatewaySuccessful);
+
+      const initialStatus = isGatewaySuccessful ? 'succeeded' : 'pending';
+
+      const newPayment = new Payment({
+        amount: finalAmount,
+        originalAmount: amount,
+        originalCurrency: currency,
+        currency: finalCurrency,
+        paymentMethod: "MoMo",
+        paymentMethodProvider: "LanariPay",
+        paymentStatus: initialStatus,
+        paymentDate: new Date(),
+        userId,
+        movieId,
+        type,
+        referenceId: payment.referenceId,
+        filmmakerAmount: distribution.filmmakerAmount,
+        adminAmount: distribution.adminAmount,
+        exchangeRate: currency !== "RWF" ? (finalAmount / amount) : 1,
+        financialTransactionId: payment.data?.gateway_response?.data?.transaction_id,
+      });
+      await newPayment.save();
+
+      let withdrawalResults = null;
+
+      // 🔥 IF GATEWAY SAYS SUCCESSFUL, PROCESS EVERYTHING IMMEDIATELY
+      if (isGatewaySuccessful) {
+        console.log("✅ Gateway status is SUCCESSFUL - Processing full workflow");
+        
+        try {
+          // Grant access to movie
+          await grantMovieAccess(newPayment);
+          console.log("✅ Movie access granted");
+
+          // Update filmmaker revenue
+          await updateFilmmakerRevenue(
+            newPayment.movieId,
+            newPayment.filmmakerAmount,
+            newPayment.amount
+          );
+          console.log("✅ Filmmaker revenue updated");
+
+          // 🔥 PROCESS AUTOMATIC WITHDRAWALS
+          withdrawalResults = await processAutomaticWithdrawals(newPayment, movie);
+          console.log("✅ Automatic withdrawals processed:", withdrawalResults);
+
+        } catch (accessError) {
+          console.error("❌ Error in post-payment processing:", accessError);
+        }
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: isGatewaySuccessful 
+          ? "Payment successful! Access granted and withdrawals processed." 
+          : "Payment initiated successfully. Waiting for confirmation.",
+        transactionId: newPayment.id,
+        referenceId: payment.referenceId,
+        status: isGatewaySuccessful ? "SUCCESSFUL" : "PENDING",
+        customerTransaction: {
+          transactionId: newPayment.id,
+          referenceId: payment.referenceId,
+          amount: finalAmount,
+          originalAmount: amount,
+          currency: finalCurrency,
+          originalCurrency: currency,
+          status: initialStatus,
+          gatewayStatus: gatewayStatus,
+          accessGranted: isGatewaySuccessful,
+        },
+        withdrawals: withdrawalResults ? {
+          filmmaker: withdrawalResults.filmmaker,
+          admin: withdrawalResults.admin,
+        } : null,
+        distribution: {
+          totalAmount: distribution.totalAmount,
+          filmmakerAmount: distribution.filmmakerAmount,
+          filmmakerPercentage: distribution.filmmakerPercentage,
+          adminAmount: distribution.adminAmount,
+          adminPercentage: distribution.adminPercentage,
+        },
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Payment initiation failed",
+        error: payment.error,
+        data: payment.data,
+      });
+    }
+  } catch (error) {
+    console.error("❌ MoMo Payment Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Payment processing error",
+      error: error.message,
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  }
+};
+
+/**
+ * 🔥 NEW: Get Withdrawal History
+ * GET /api/withdrawals/user/:userId
+ */
+export const getUserWithdrawals = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { page = 1, limit = 20, status, type } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+
+    const where = { userId };
+    if (status) where.status = status;
+    if (type) where.type = type;
+
+    const withdrawals = await Withdrawal.findAll({
+      where,
+      include: [
+        {
+          model: Payment,
+          as: 'payment',
+          attributes: ['id', 'amount', 'type', 'movieId'],
+        },
+      ],
+      order: [['createdAt', 'DESC']],
+      offset: skip,
+      limit: limitNum,
+    });
+
+    const total = await Withdrawal.count({ where });
+
+    res.status(200).json({
+      success: true,
+      data: withdrawals,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 🔥 NEW: Get Withdrawal Details
+ * GET /api/withdrawals/:withdrawalId
+ */
+export const getWithdrawalDetails = async (req, res) => {
+  try {
+    const { withdrawalId } = req.params;
+
+    const withdrawal = await Withdrawal.findByPk(withdrawalId, {
+      include: [
+        {
+          model: Payment,
+          as: 'payment',
+          include: [
+            { model: Movie, as: 'movie', attributes: ['title', 'poster'] },
+          ],
+        },
+        {
+          model: User,
+          as: 'user',
+          attributes: ['name', 'email'],
+        },
+      ],
+    });
+
+    if (!withdrawal) {
+      return res.status(404).json({
+        success: false,
+        message: "Withdrawal not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: withdrawal,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
 /**
  * Process payouts to filmmaker and admin
  */
@@ -170,163 +572,6 @@ const processPayouts = async (payment, movie) => {
   } catch (error) {
     console.error('❌ Error processing payouts:', error);
     return { success: false, error: error.message };
-  }
-};
-
-// ====== PAYMENT ENDPOINTS ======
-
-/**
- * Process MoMo (Mobile Money) Payment
- * POST /api/payments/momo
- */
-
-// In payWithMoMo function, update the payment initiation:
-// In your payWithMoMo function, add this debug logging and validation:
-export const payWithMoMo = async (req, res) => {
-  try {
-    const { error, value } = paymentValidationSchema.validate(req.body);
-    if (error) {
-      return res.status(400).json({
-        success: false,
-        message: "Validation error",
-        error: error.details.map((d) => d.message).join(", "),
-      });
-    }
-
-    const { amount, phoneNumber, userId, movieId, description, currency, type } = value;
-
-    console.log("📱 Payment Request Received:", {
-      amount,
-      currency,
-      phoneNumber,
-      movieId,
-      type,
-      userId
-    });
-
-    // Verify movie exists
-    const movie = await Movie.findByPk(movieId);
-    if (!movie) {
-      return res.status(404).json({ 
-        success: false,
-        message: "Movie not found" 
-      });
-    }
-
-    // Calculate distribution
-    const distribution = calculatePaymentDistribution(amount);
-
-    // Convert amount to RWF if not already
-    let finalAmount = amount;
-    let finalCurrency = currency;
-    
-    if (currency !== "RWF") {
-      console.log(`Converting ${currency} ${amount} to RWF`);
-      // Use actual exchange rate API or fixed rates
-      const exchangeRates = {
-        USD: 1200, // 1 USD = 1200 RWF
-        EUR: 1300, // 1 EUR = 1300 RWF
-        GBP: 1500, // 1 GBP = 1500 RWF
-      };
-      
-      if (exchangeRates[currency]) {
-        finalAmount = Math.round(amount * exchangeRates[currency]);
-        finalCurrency = "RWF";
-        console.log(`Converted to: ${finalAmount} RWF`);
-      } else {
-        console.warn(`No exchange rate for ${currency}, using amount as-is`);
-      }
-    }
-
-    // Format phone number
-    let formattedPhone = phoneNumber.replace(/[+\s]/g, '');
-    if (formattedPhone.startsWith("0")) {
-      formattedPhone = "0" + formattedPhone.substring(1);
-    } else if (!formattedPhone.startsWith("0")) {
-      formattedPhone = "0" + formattedPhone;
-    }
-
-    // Request payment from customer
-    const payment = await requestToPay(
-      finalAmount,
-      formattedPhone,
-      userId,
-      description || `${type.charAt(0).toUpperCase() + type.slice(1)} ${movie.title}`,
-      finalCurrency
-    );
-
-    console.log("📱 Lanari Pay Response:", payment);
-
-    if (payment.success) {
-      // Save payment record
-      const newPayment = new Payment({
-        amount: finalAmount,
-        originalAmount: amount,
-        originalCurrency: currency,
-        currency: finalCurrency,
-        paymentMethod: "MoMo",
-        paymentMethodProvider: "LanariPay",
-        paymentStatus: "pending",
-        paymentDate: new Date(),
-        userId,
-        movieId,
-        type,
-        referenceId: payment.referenceId,
-        filmmakerAmount: distribution.filmmakerAmount,
-        adminAmount: distribution.adminAmount,
-        exchangeRate: currency !== "RWF" ? (finalAmount / amount) : 1,
-      });
-      await newPayment.save();
-
-      return res.status(200).json({
-        success: true,
-        message: "Payment initiated successfully",
-        transactionId: newPayment.id,
-        referenceId: payment.referenceId,
-        status: "PENDING",
-        customerTransaction: {
-          transactionId: newPayment.id,
-          referenceId: payment.referenceId,
-          amount: finalAmount,
-          originalAmount: amount,
-          currency: finalCurrency,
-          originalCurrency: currency,
-          status: "pending",
-        },
-        distribution: {
-          totalAmount: distribution.totalAmount,
-          filmmakerAmount: distribution.filmmakerAmount,
-          filmmakerPercentage: distribution.filmmakerPercentage,
-          adminAmount: distribution.adminAmount,
-          adminPercentage: distribution.adminPercentage,
-        },
-        debug: {
-          amountSent: finalAmount,
-          currencySent: finalCurrency,
-          phoneSent: formattedPhone,
-        },
-      });
-    } else {
-      return res.status(400).json({
-        success: false,
-        message: "Payment initiation failed",
-        error: payment.error,
-        data: payment.data,
-        debug: {
-          amount: finalAmount,
-          currency: finalCurrency,
-          phone: formattedPhone,
-        },
-      });
-    }
-  } catch (error) {
-    console.error("❌ MoMo Payment Error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Payment processing error",
-      error: error.message,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    });
   }
 };
 

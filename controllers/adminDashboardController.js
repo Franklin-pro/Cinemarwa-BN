@@ -3,6 +3,7 @@ import Movie from "../models/Movie.model.js";
 import Payment from "../models/Payment.model.js";
 import Review from "../models/Review.model.js";
 import Joi from "joi";
+import { Op } from "sequelize";
 
 // ====== VALIDATION SCHEMAS ======
 
@@ -117,8 +118,7 @@ export const getDetailedAnalytics = async (req, res) => {
         startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     }
 
-    // Get metrics for period
-    const { Op } = require("sequelize");
+  
     const newUsers = await User.count({
       where: {
         createdAt: { [Op.gte]: startDate },
@@ -688,22 +688,39 @@ export const getPaymentReconciliation = async (req, res) => {
         startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     }
 
-    const payments = await Payment.find({
-      paymentDate: { $gte: startDate },
-      paymentStatus: "succeeded",
-    }).populate("movieId", "title filmmaker");
+
+    // Fetch payments in range with movie + filmmaker
+    const payments = await Payment.findAll({
+      where: {
+        paymentDate: { [Op.gte]: startDate },
+        paymentStatus: "succeeded",
+      },
+      include: [
+        {
+          model: Movie,
+          attributes: ["id", "title", "filmmakerId"],
+          include: [
+            {
+              model: User,
+              as: "filmmaker",
+              attributes: ["id", "name", "email"],
+            },
+          ],
+        },
+      ],
+    });
 
     let totalPlatformEarnings = 0;
-    let filmmmakerPayouts = {};
+    const filmmakerPayouts = {};
 
     payments.forEach((payment) => {
-      const platformFee = payment.amount * 0.1; // 10% platform fee
+      const platformFee = payment.amount * 0.1;
       totalPlatformEarnings += platformFee;
 
-      const filmamakerId = payment.movieId?.filmmaker?.filmamakerId;
-      if (filmamakerId) {
-        filmmmakerPayouts[filmamakerId] =
-          (filmmmakerPayouts[filmamakerId] || 0) + (payment.amount * 0.9);
+      const filmmakerId = payment.Movie?.filmmakerId;
+      if (filmmakerId) {
+        filmmakerPayouts[filmmakerId] =
+          (filmmakerPayouts[filmmakerId] || 0) + payment.amount * 0.9;
       }
     });
 
@@ -712,9 +729,9 @@ export const getPaymentReconciliation = async (req, res) => {
       dateRange: { start: startDate, end: now },
       totalRevenue: payments.reduce((sum, p) => sum + p.amount, 0).toFixed(2),
       platformEarnings: totalPlatformEarnings.toFixed(2),
-      filmmmakerPayouts: Object.entries(filmmmakerPayouts).map(
-        ([filmamakerId, amount]) => ({
-          filmamakerId,
+      filmmakerPayouts: Object.entries(filmmakerPayouts).map(
+        ([filmmakerId, amount]) => ({
+          filmmakerId,
           payoutAmount: amount.toFixed(2),
         })
       ),
@@ -724,6 +741,7 @@ export const getPaymentReconciliation = async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
 
 export const recentAdminActivities = async (req, res) => {
   try {

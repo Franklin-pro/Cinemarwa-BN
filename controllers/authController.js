@@ -3,21 +3,15 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { createAndSendOTP, verifyOTP, deleteOTP } from "../utils/otpHelper.js";
+// controllers/authController.js - Register function
+import { getDeviceInfo } from '../utils/deviceHelper.js';
 
-// Generate unique device ID
-const generateDeviceId = (req) => {
-    const userAgent = req.headers['user-agent'] || '';
-    const ip = req.ip || req.connection.remoteAddress;
-    return crypto.createHash('md5').update(userAgent + ip).digest('hex');
-};
 
-// Register
 export const register = async (req, res) => {
-    const { name, email, password, role } = req.body; // ✅ include role
+    const { name, email, password, role, deviceFingerprint } = req.body;
+    
     try {
-        const existingUser = await User.findOne({ 
-            where: { email }
-         });
+        const existingUser = await User.findOne({ where: { email } });
         if (existingUser) {
             return res.status(400).json({ message: "User already exists" });
         }
@@ -29,31 +23,39 @@ export const register = async (req, res) => {
             name,
             email,
             password: hashedPassword,
-            role: role || "viewer", // ✅ use role if provided
+            role: role || "viewer",
             isUpgraded: false,
-            maxDevices: 1
+            maxDevices: role === 'filmmaker' ? 2 : 1,
+            activeDevices: []
         });
 
-        const deviceId = generateDeviceId(req);
+        // Safely get device info
+        const deviceInfo = getDeviceInfo({
+            ...req,
+            body: { ...req.body, deviceFingerprint },
+            headers: {
+                ...req.headers,
+                'x-device-fingerprint': deviceFingerprint || ''
+            }
+        });
 
         const token = jwt.sign(
             {
                 userId: user.id,
                 role: user.role,
-                deviceId: deviceId
+                deviceId: deviceInfo.deviceId
             },
             process.env.JWT_SECRET,
-            { expiresIn: "1h" }
+            { expiresIn: "7d" }
         );
 
-        user.activeDevices = user.activeDevices || [];
-        user.activeDevices.push({
-            deviceId: deviceId,
+        // Add device to user
+        user.activeDevices = [{
+            ...deviceInfo,
             token: token,
-            userAgent: req.headers['user-agent'],
-            ipAddress: req.ip
-        });
-        // Mark the JSON field as changed for Sequelize
+            loginAt: new Date()
+        }];
+        
         user.changed('activeDevices', true);
         await user.save();
 
@@ -65,12 +67,19 @@ export const register = async (req, res) => {
                 email: user.email,
                 role: user.role,
                 isUpgraded: user.isUpgraded,
-                maxDevices: user.maxDevices
+                maxDevices: user.maxDevices,
+                currentDevices: 1
             },
-            token
+            token,
+            deviceId: deviceInfo.deviceId
         });
     } catch (error) {
-        res.status(500).json({ message: "Server error", error: error.message });
+        console.error('Registration error:', error);
+        res.status(500).json({ 
+            message: "Server error", 
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
     }
 };
 
@@ -128,19 +137,16 @@ export const login = async (req, res) => {
 };
 
 // Login - Step 2: Verify OTP and create session
+// controllers/authController.js
 export const verifyLoginOTP = async (req, res) => {
-    const { email, otp } = req.body;
+    const { email, otp, deviceFingerprint } = req.body;
+    
     try {
-        // Validate input
         if (!email || !otp) {
             return res.status(400).json({ message: "Email and OTP are required" });
         }
 
-        // FIRST: Check if user exists BEFORE verifying OTP
-        const user = await User.findOne({ 
-            where: { email } 
-        });
-        
+        const user = await User.findOne({ where: { email } });
         if (!user) {
             return res.status(401).json({ 
                 message: "User not found. Please register first." 
@@ -149,7 +155,6 @@ export const verifyLoginOTP = async (req, res) => {
 
         // Verify OTP
         const otpVerifyResult = await verifyOTP(email, otp);
-
         if (!otpVerifyResult.success) {
             return res.status(401).json({
                 message: otpVerifyResult.message,
@@ -158,45 +163,74 @@ export const verifyLoginOTP = async (req, res) => {
             });
         }
 
-        // Generate device ID
-        const deviceId = generateDeviceId(req);
-        const existingDevice = user.activeDevices.find(device => device.deviceId === deviceId);
+        // Safely get device info
+        const deviceInfo = getDeviceInfo({
+            ...req,
+            body: { ...req.body, deviceFingerprint },
+            headers: {
+                ...req.headers,
+                'x-device-fingerprint': deviceFingerprint || ''
+            }
+        });
 
-        // Create JWT token
+        // Check device limit
+        const currentDevices = Array.isArray(user.activeDevices) ? user.activeDevices : [];
+        
+        if (currentDevices.length >= user.maxDevices) {
+            // If max devices reached, check if this is a returning device
+            const isReturningDevice = currentDevices.some(
+                device => device && device.deviceId === deviceInfo.deviceId
+            );
+            
+            if (!isReturningDevice) {
+                return res.status(403).json({
+                    message: `Maximum ${user.maxDevices} device(s) allowed. Please logout from another device or upgrade your account.`,
+                    maxDevices: user.maxDevices,
+                    currentDevices: currentDevices.length,
+                    code: 'DEVICE_LIMIT_REACHED'
+                });
+            }
+        }
+
         const token = jwt.sign(
             {
                 userId: user.id,
                 role: user.role,
-                deviceId: deviceId
+                deviceId: deviceInfo.deviceId
             },
             process.env.JWT_SECRET,
-            { expiresIn: "1h" }
+            { expiresIn: "7d" }
         );
 
         // Update or add device
-        if (existingDevice) {
-            // Update existing device token
-            const deviceIndex = user.activeDevices.findIndex(d => d.deviceId === deviceId);
-            if (deviceIndex !== -1) {
-                user.activeDevices[deviceIndex].token = token;
-                user.activeDevices[deviceIndex].loginAt = new Date();
-                user.changed('activeDevices', true);
-            }
+        const deviceIndex = currentDevices.findIndex(
+            d => d && d.deviceId === deviceInfo.deviceId
+        );
+
+        if (deviceIndex !== -1) {
+            // Update existing device
+            const updatedDevice = {
+                ...currentDevices[deviceIndex],
+                ...deviceInfo,
+                token: token,
+                loginAt: new Date()
+            };
+            currentDevices[deviceIndex] = updatedDevice;
         } else {
             // Add new device
-            user.activeDevices = user.activeDevices || [];
-            user.activeDevices.push({
-                deviceId: deviceId,
+            currentDevices.push({
+                ...deviceInfo,
                 token: token,
-                userAgent: req.headers['user-agent'],
-                ipAddress: req.ip,
                 loginAt: new Date()
             });
-            user.changed('activeDevices', true);
         }
+        
+        // Update user's active devices
+        user.activeDevices = currentDevices;
+        user.changed('activeDevices', true);
         await user.save();
 
-        // Delete OTP after successful verification
+        // Delete OTP
         await deleteOTP(email);
 
         res.status(200).json({
@@ -207,12 +241,19 @@ export const verifyLoginOTP = async (req, res) => {
                 email: user.email,
                 role: user.role,
                 isUpgraded: user.isUpgraded,
-                maxDevices: user.maxDevices
+                maxDevices: user.maxDevices,
+                currentDevices: currentDevices.length
             },
-            token
+            token,
+            deviceId: deviceInfo.deviceId
         });
     } catch (error) {
-        res.status(500).json({ message: "Server error", error: error.message });
+        console.error('Login OTP verification error:', error);
+        res.status(500).json({ 
+            message: "Server error", 
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
     }
 };
 // Resend OTP

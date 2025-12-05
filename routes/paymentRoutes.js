@@ -7,6 +7,8 @@ import {
   confirmPayment,
   getMovieAnalytics,
   lanariPayWebhook,
+  getUserWithdrawals,
+  getWithdrawalDetails,
 } from "../controllers/paymentController.js";
 import { authenticateToken, requireAdmin } from "../middleware/authMiddleware.js";
 
@@ -44,5 +46,21 @@ router.patch("/:paymentId/confirm", authenticateToken, confirmPayment);
 // Get movie sales & revenue analytics (Admin only)
 // GET /payments/movie/:movieId/analytics
 router.get("/movie/:movieId/analytics", authenticateToken, requireAdmin, getMovieAnalytics);
+
+// ====== WITHDRAWAL ROUTES ======
+
+/**
+ * @route   GET /api/withdrawals/user/:userId
+ * @desc    Get user's withdrawal history
+ * @access  Protected (Own withdrawals or Admin)
+ */
+router.get('/withdrawals/user/:userId', authenticateToken, getUserWithdrawals);
+
+/**
+ * @route   GET /api/withdrawals/:withdrawalId
+ * @desc    Get withdrawal details
+ * @access  Protected (Own withdrawal or Admin)
+ */
+router.get('/withdrawals/:withdrawalId', authenticateToken, getWithdrawalDetails);
 
 export default router;
