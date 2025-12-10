@@ -34,14 +34,11 @@ export const connectDB = async () => {
 
 export const syncDB = async () => {
   try {
-    console.log('🔄 Synchronizing database...');
-    await sequelize.sync({ 
-      alter: process.env.NODE_ENV === 'development',
-      logging: false 
-    });
-    console.log('✅ Database synchronized successfully');
+    console.log('🔄 Force resetting database...');
+    // await sequelize.sync({ force: true });
+    console.log('✅ Database reset complete');
   } catch (error) {
-    console.error('❌ Database sync failed:', error);
+    console.error('❌ Database reset failed:', error);
     throw error;
   }
 };

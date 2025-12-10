@@ -12,6 +12,7 @@ import {
   getFilmmmakerStats,
   updatePaymentMethod,
   getPaymentMethod,
+  getSeriesEpisodes,
 } from "../controllers/filmmmakerController.js";
 import {
   authenticateToken,
@@ -126,6 +127,12 @@ router.get(
   authenticateToken,
   requireFilmmaker,
   getFilmmmakerMovies
+);
+router.get(
+  "/series/:seriesId/episodes",
+  authenticateToken,
+  requireFilmmaker,
+  getSeriesEpisodes
 );
 
 // Edit filmmaker movie

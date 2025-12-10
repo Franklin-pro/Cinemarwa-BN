@@ -9,6 +9,8 @@ import {
   lanariPayWebhook,
   getUserWithdrawals,
   getWithdrawalDetails,
+  paySubscriptionWithMoMo,
+  paySubscriptionWithStripe,
 } from "../controllers/paymentController.js";
 import { authenticateToken, requireAdmin } from "../middleware/authMiddleware.js";
 
@@ -24,6 +26,9 @@ router.post("/webhook/lanari-pay", lanariPayWebhook);
 // Process Stripe payment
 // POST /payments/stripe
 router.post("/stripe", payWithStripe);
+// ====== SUBSCRIPTION PAYMENT ROUTES ======
+router.post('/subscription/momo', paySubscriptionWithMoMo);
+router.post('/subscription/stripe', paySubscriptionWithStripe);
 
 // ====== PAYMENT QUERIES ======
 

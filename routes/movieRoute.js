@@ -1,7 +1,6 @@
 import express from "express";
 import {
-  getMovies,
-  getMovieById,
+   getMovieById,
   updateMovie,
   deleteMovie,
   searchMovies,
@@ -16,6 +15,9 @@ import {
   // uploadSubtitle,
   getStreamingUrls,
   getMovieCategories,
+  getAllMovies,
+  getFilmmakerSeries,
+  addRatingMovies,
 } from "../controllers/movieController.js";
 import { authenticateToken, requireAdmin } from "../middleware/authMiddleware.js";
 import {
@@ -23,17 +25,20 @@ import {
   uploadImageMiddleware,
   uploadMovieFilesMiddleware,
 } from "../utils/backblazeB2.js";
+import { getSecureStreamUrl } from "../controllers/paymentController.js";
+import { addEpisode, createSeries } from "../controllers/series.controller.js";
 
 const router = express.Router();
 
 // ====== PUBLIC ROUTES ======
 
 // Get all movies (with pagination, filtering, sorting)
-router.get("/", getMovies);
+router.get("/", getAllMovies);
 
 // Search movies
 // api/movies/search?query= In the query string
 router.get("/search", searchMovies);
+router.get('/secure-stream/:movieId', authenticateToken, getSecureStreamUrl);
 
 // Get trending movies
 router.get("/trending", getTrendingMovies);
@@ -46,7 +51,7 @@ router.get("/category/:category", getMoviesByCategory);
 router.get("/categories", getMovieCategories);
 // Get movies by filmmaker
 router.get("/filmmaker/:filmamakerId", getFilmmakerMovies);
-
+router.get("/filmmaker/:filmmakerId/series", getFilmmakerSeries);
 // Get movie by ID or slug (must be last)
 router.get("/:id", getMovieById);
 
@@ -60,7 +65,9 @@ router.post(
   uploadMovieFilesMiddleware(),
   addMovie
 );
-
+router.post("/:filmmakerId/series", authenticateToken, createSeries);
+router.post("/:filmmakerId/series/:seriesId/add-episode", authenticateToken, addEpisode);
+router.post("/rating", authenticateToken,addRatingMovies);
 // Update movie (Filmmaker or Admin)
 router.put("/:id", authenticateToken, updateMovie);
 

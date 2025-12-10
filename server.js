@@ -14,6 +14,7 @@ import adminRoutes from "./routes/adminRoute.js";
 import filmmmakerRoutes from "./routes/filmmmakerRoute.js";
 import googleOAuthRoutes from "./routes/googleOAuthRoutes.js";
 import { initializePassport } from "./config/googleOAuth.js";
+import subscribeRoutes from "./routes/subscribeRoutes.js";
 import { User, Movie, Review, Payment, OTP } from "./models/index.js";
 
 dotenv.config();
@@ -44,6 +45,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/auth", googleOAuthRoutes);
 app.use("/api/filmmaker", filmmmakerRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/subscribe", subscribeRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -62,11 +64,13 @@ async function startServer() {
   try {
     // Connect to database
     await connectDB();
+    
 
     // Sync database models
     await sequelize.sync({ 
       alter: process.env.NODE_ENV === 'development',
-      logging: false 
+      logging: false, 
+      // force: true
     });
 
     // Initialize session store

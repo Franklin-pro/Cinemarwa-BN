@@ -40,7 +40,7 @@ export const getAdminDashboard = async (req, res) => {
 
     // Get payment statistics
     const payments = await Payment.findAll({ where: { paymentStatus: "succeeded" } });
-    const totalRevenue = payments.reduce((sum, p) => sum + p.amount, 0);
+    const totalRevenue = payments.reduce((sum, p) => sum + Number(p.amount), 0);
     const totalTransactions = payments.length;
 
     // Get pending filmmaker approvals
@@ -135,7 +135,8 @@ export const getDetailedAnalytics = async (req, res) => {
         paymentStatus: "succeeded",
       },
     });
-    const periodRevenue = periodPayments.reduce((sum, p) => sum + p.amount, 0);
+   const periodRevenue = periodPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+
 
     // Get top movies
     const topMovies = await Movie.findAll({
@@ -206,7 +207,7 @@ export const getPendingFilmmakers = async (req, res) => {
       order: [['createdAt', 'DESC']],
       offset: skip,
       limit: limitNum,
-      attributes: ['name', 'email', 'filmmmakerIsVerified', 'approvalStatus', 'filmmmakerStatsTotalMovies', 'filmmmakerStatsTotalRevenue', 'createdAt', 'rejectionReason']
+      attributes: ['id','name', 'email', 'filmmmakerIsVerified', 'approvalStatus', 'filmmmakerStatsTotalMovies', 'filmmmakerStatsTotalRevenue', 'createdAt', 'rejectionReason']
     });
 
     const total = await User.count({
@@ -369,7 +370,6 @@ export const getAllUsers = async (req, res) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
     const skip = (pageNum - 1) * limitNum;
 
-    const { Op } = require("sequelize");
     let where = {};
     if (role) where.role = role;
     if (search) {
@@ -537,14 +537,30 @@ export const getPendingMovies = async (req, res) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
     const skip = (pageNum - 1) * limitNum;
 
-    const movies = await Movie.findAll({
-      where: { status: "submitted" },
-      include: [{ association: 'filmmaker', attributes: ['id', 'name', 'email'] }],
-      order: [['createdAt', 'DESC']],
-      offset: skip,
-      limit: limitNum,
-      attributes: ['title', 'overview', 'filmmaker', 'avgRating', 'reviewCount', 'status', 'submittedAt', 'release_date', 'videoDuration']
-    });
+const movies = await Movie.findAll({
+  where: { status: "submitted" },
+  include: [
+    {
+      association: 'filmmaker',
+      attributes: ['id', 'name', 'email']
+    }
+  ],
+  order: [['createdAt', 'DESC']],
+  offset: skip,
+  limit: limitNum,
+  attributes: [
+    'id',
+    'title',
+    'description',
+    'avgRating',
+    'totalReviews',
+    'status',
+    'uploadedAt',
+    'release_date',
+    'videoDuration'
+  ]
+});
+
 
     const total = await Movie.count({ where: { status: "submitted" } });
 
@@ -622,35 +638,41 @@ export const getFlaggedContent = async (req, res) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
     const skip = (pageNum - 1) * limitNum;
 
-    // Get low-rated movies (potential quality issues)
+    // Low-rated movies
     const flaggedMovies =
       type === "all" || type === "movies"
         ? await Movie.findAll({
-            where: { avgRating: { [require('sequelize').Op.lt]: 3 } },
-            attributes: ["title", "avgRating", "reviewCount", "status"],
-            order: [['avgRating', 'ASC']],
+            where: { avgRating: { [Op.lt]: 3 } },
+            attributes: ["title", "avgRating", "totalReviews", "status"],
+            order: [["avgRating", "ASC"]],
             offset: skip,
-            limit: limitNum
+            limit: limitNum,
           })
         : [];
 
-    // Get reviews with many negative comments (potential spam)
+    // Negative reviews
     const flaggedReviews =
       type === "all" || type === "reviews"
         ? await Review.findAll({
-            where: { rating: { [require('sequelize').Op.lt]: 2 } },
-            attributes: ["comment", "rating", "movie"],
-            include: [{ association: "movie", attributes: ["title"] }],
-            order: [['rating', 'ASC']],
+            where: { rating: { [Op.lt]: 2 } },
+            attributes: ["comment", "rating"],
+            include: [
+              {
+                association: "movie",
+                attributes: ["title"],
+              },
+            ],
+            order: [["rating", "ASC"]],
             offset: skip,
-            limit: limitNum
+            limit: limitNum,
           })
         : [];
 
     res.status(200).json({
-      flaggedMovies: flaggedMovies || [],
-      flaggedReviews: flaggedReviews || [],
-      totalFlagged: (flaggedMovies?.length || 0) + (flaggedReviews?.length || 0),
+      flaggedMovies,
+      flaggedReviews,
+      totalFlagged:
+        (flaggedMovies?.length || 0) + (flaggedReviews?.length || 0),
     });
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
@@ -690,44 +712,50 @@ export const getPaymentReconciliation = async (req, res) => {
 
 
     // Fetch payments in range with movie + filmmaker
-    const payments = await Payment.findAll({
-      where: {
-        paymentDate: { [Op.gte]: startDate },
-        paymentStatus: "succeeded",
-      },
+   const payments = await Payment.findAll({
+  where: {
+    paymentDate: { [Op.gte]: startDate },
+    paymentStatus: "succeeded",
+  },
+  include: [
+    {
+      model: Movie,
+      as: "movie", // <<< IMPORTANT
+      attributes: ["id", "title", "filmmakerId"],
       include: [
         {
-          model: Movie,
-          attributes: ["id", "title", "filmmakerId"],
-          include: [
-            {
-              model: User,
-              as: "filmmaker",
-              attributes: ["id", "name", "email"],
-            },
-          ],
+          model: User,
+          as: "filmmaker",
+          attributes: ["id", "name", "email"],
         },
       ],
-    });
+    },
+  ],
+});
+
 
     let totalPlatformEarnings = 0;
     const filmmakerPayouts = {};
 
     payments.forEach((payment) => {
-      const platformFee = payment.amount * 0.1;
+   const platformFee = Number(payment.amount) * 0.1;
       totalPlatformEarnings += platformFee;
 
-      const filmmakerId = payment.Movie?.filmmakerId;
-      if (filmmakerId) {
-        filmmakerPayouts[filmmakerId] =
-          (filmmakerPayouts[filmmakerId] || 0) + payment.amount * 0.9;
-      }
+const filmmakerId = payment.Movie?.filmmakerId;
+if (filmmakerId) {
+  filmmakerPayouts[filmmakerId] =
+    (filmmakerPayouts[filmmakerId] || 0) + Number(payment.amount || 0) * 0.9;
+}
+
     });
 
     res.status(200).json({
       period,
       dateRange: { start: startDate, end: now },
-      totalRevenue: payments.reduce((sum, p) => sum + p.amount, 0).toFixed(2),
+     totalRevenue: payments
+  .reduce((sum, p) => sum + Number(p.amount || 0), 0)
+  .toFixed(2),
+
       platformEarnings: totalPlatformEarnings.toFixed(2),
       filmmakerPayouts: Object.entries(filmmakerPayouts).map(
         ([filmmakerId, amount]) => ({

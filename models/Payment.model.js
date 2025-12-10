@@ -23,9 +23,17 @@ const Payment = sequelize.define('Payment', {
         type: DataTypes.STRING,
         allowNull: false
     },
+    filmmakerId: {
+        type: DataTypes.UUID,
+        allowNull: false
+    },
     paymentDate: {
         type: DataTypes.DATE,
         allowNull: false
+    },
+    type: {
+    type: DataTypes.ENUM('movie_watch', 'movie_download', 'subscription_upgrade', 'subscription_renewal'),
+    allowNull: false,
     },
     userId: {
         type: DataTypes.UUID,

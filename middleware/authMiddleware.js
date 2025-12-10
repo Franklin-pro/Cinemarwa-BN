@@ -226,7 +226,8 @@ export const requireFilmmakerVerified = async (req, res, next) => {
       });
     }
 
-    if (!user.filmmaker?.isVerified) {
+    if (!user.filmmaker?.bankDetails?.isVerified) {
+      console.log("Bank details not verified:", user.filmmaker?.bankDetails);
       return res.status(403).json({
         message: "Your filmmaker account must be verified",
         completionRequired: {

@@ -39,6 +39,7 @@ const User = sequelize.define('User', {
         type: DataTypes.BOOLEAN,
         defaultValue: false
     },
+    
     activeDevices: {
         type: DataTypes.JSON,
         defaultValue: [],
