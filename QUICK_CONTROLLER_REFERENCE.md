@@ -365,6 +365,20 @@ SELECT * FROM "Reviews" LIMIT 10;
 SELECT * FROM "Payments" WHERE "paymentStatus" = 'completed';
 ```
 
+### Sending notifications with inline image attachment
+
+Example usage for the notify route (requires admin token):
+
+```bash
+curl -X POST http://localhost:5000/api/subscriptions/notify \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -F "subject=New release" \
+  -F "message=We've uploaded a new movie — see the screenshot" \
+  -F "image=@/path/to/screenshot.png"
+```
+
+The file is attached inline and displayed inside the email.
+
 ---
 
 ## PostgreSQL vs MongoDB Differences

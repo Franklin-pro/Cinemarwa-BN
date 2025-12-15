@@ -429,7 +429,6 @@ export const loginWithGoogle = async (req, res) => {
         }
 
         user.changed("activeDevices", true);
-        console.log(user);
         await user.save();
 
         // Redirect back to frontend with JWT
@@ -446,3 +445,28 @@ export const loginWithGoogle = async (req, res) => {
 export const googleOAuthCallback = (req, res) => {
     res.send("Google OAuth callback handled by passport.");
 }
+
+
+export const subscribeToNewsletter = async (req, res) => {
+    const { email } = req.body;
+    try {
+        const user = await User.findOne({ where: { email } });
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        user.isSubscribed = true;
+        await user.save();
+
+        res.status(200).json({ message: "Subscribed to newsletter successfully" });
+    } catch (error) {
+        res.status(500).json({ message: "Server error", error: error.message });
+    }
+};
+
+const generateDeviceId = (req) => {
+    const userAgent = req.headers['user-agent'] || '';
+    const ipAddress = req.ip || req.connection.remoteAddress || '';
+    const rawId = `${userAgent}-${ipAddress}`;
+    return crypto.createHash('sha256').update(rawId).digest('hex');
+};

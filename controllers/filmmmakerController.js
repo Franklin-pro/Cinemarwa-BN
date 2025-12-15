@@ -2,21 +2,7 @@ import User from "../models/User.modal.js";
 import Movie from "../models/Movie.model.js";
 import Payment from "../models/Payment.model.js";
 import Joi from "joi";
-
-// ====== AUTHORIZATION HELPER ======
-/**
- * Verify that filmmaker can only access their own data
- * @param {string} requestedId - The ID being requested (from params)
- * @param {string} authenticatedId - The authenticated user's ID
- * @returns {boolean} True if authorized
- */
-const canAccessFilmmakerData = (requestedId, authenticatedId) => {
-  // If no ID is being requested, it's the authenticated user's own data
-  if (!requestedId) return true;
-
-  // Compare IDs as strings to handle ObjectId comparison
-  return requestedId.toString() === authenticatedId.toString();
-};
+import { Op } from "sequelize";
 
 // ====== VALIDATION SCHEMAS ======
 
@@ -47,6 +33,12 @@ const withdrawalSchema = Joi.object({
   notes: Joi.string().max(500),
 });
 
+// FIXED: Enhanced helper function to safely parse numeric values
+const safeParseNumber = (value) => {
+  const num = Number(value);
+  return isNaN(num) ? 0 : num;
+};
+
 // ====== FILMMAKER PROFILE MANAGEMENT ======
 
 /**
@@ -55,24 +47,34 @@ const withdrawalSchema = Joi.object({
  */
 export const getFilmmmakerProfile = async (req, res) => {
   try {
-    const filmmaker = await User.findByPk(req.userId, {
-      attributes: ["name", "email", "role", "filmmmakerIsVerified", "filmmmakerBio", "filmmmakerProfileImage", "filmmmakerBankDetails", "filmmmakerStatsTotalMovies", "filmmmakerStatsTotalRevenue", "filmmmakerStatsTotalViews", "filmmmakerStatsTotalDownloads", "filmmmakerFinancePendingBalance", "filmmmakerFinanceWithdrawnBalance", "approvalStatus"]
+    const filmmaker = await User.findByPk(req.user.id || req.userId, {
+      attributes: ["name", "email", "role", "filmmmakerIsVerified", "filmmmakerBio", "filmmmakerProfileImage", "filmmmakerBankDetails", "filmmmakerStatsTotalMovies", "filmmmakerStatsTotalRevenue", "filmmmakerStatsTotalViews", "filmmmakerFinancePendingBalance", "filmmmakerFinanceWithdrawnBalance", "approvalStatus"]
     });
 
     if (!filmmaker || filmmaker.role !== "filmmaker") {
-      return res.status(404).json({ message: "Filmmaker not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
     }
 
     res.status(200).json({
-      filmmaker,
-      verification: {
-        profileVerified: filmmaker.filmmmakerIsVerified,
-        bankDetailsVerified: filmmaker.filmmmakerBankDetails?.isVerified,
-        accountApproved: filmmaker.approvalStatus === "approved",
-      },
+      success: true,
+      data: {
+        filmmaker,
+        verification: {
+          profileVerified: filmmaker.filmmmakerIsVerified,
+          bankDetailsVerified: filmmaker.filmmmakerBankDetails?.isVerified || false,
+          accountApproved: filmmaker.approvalStatus === "approved",
+        },
+      }
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
 
@@ -85,125 +87,460 @@ export const updateFilmmmakerProfile = async (req, res) => {
     const { error, value } = filmmmakerProfileSchema.validate(req.body);
     if (error) {
       return res.status(400).json({
+        success: false,
         message: "Validation error",
         error: error.details.map((d) => d.message).join(", "),
       });
     }
 
-    const filmmaker = await User.findByPk(req.userId);
+    const filmmaker = await User.findByPk(req.user.id || req.userId);
 
-    if (filmmaker) {
-      if (value.bio) filmmaker.filmmmakerBio = value.bio;
-      if (value.website) filmmaker.filmmmakerWebsite = value.website;
-      if (value.socialLinks) filmmaker.filmmmakerSocialLinks = value.socialLinks;
-      if (value.bankDetails) {
-        filmmaker.filmmmakerBankDetails = value.bankDetails;
-        filmmaker.filmmmakerBankDetails.isVerified = false; // Admin must verify
-      }
-      if (value.payoutMethod) {
-        filmmaker.filmmmakerFinancePayoutMethod = value.payoutMethod;
-      }
-      await filmmaker.save();
+    if (!filmmaker) {
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
     }
 
+    if (value.bio) filmmaker.filmmmakerBio = value.bio;
+    if (value.website) filmmaker.filmmmakerWebsite = value.website;
+    if (value.socialLinks) filmmaker.filmmmakerSocialLinks = value.socialLinks;
+    if (value.bankDetails) {
+      filmmaker.filmmmakerBankDetails = {
+        ...value.bankDetails,
+        isVerified: false, // Admin must verify
+        updatedAt: new Date()
+      };
+    }
+    if (value.payoutMethod) {
+      filmmaker.filmmmakerFinancePayoutMethod = value.payoutMethod;
+    }
+    
+    await filmmaker.save();
+
     res.status(200).json({
+      success: true,
       message: "Profile updated successfully",
-      filmmaker,
-      nextStep: value.bankDetails
-        ? "Bank details submitted. Awaiting admin verification"
-        : "Profile updated",
+      data: {
+        filmmaker,
+        nextStep: value.bankDetails
+          ? "Bank details submitted. Awaiting admin verification"
+          : "Profile updated",
+      }
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
 
 // ====== FILMMAKER ANALYTICS DASHBOARD ======
 
+// ====== FILMMAKER ANALYTICS DASHBOARD ======
+
 /**
- * Get filmmaker dashboard summary
- * GET /filmmaker/dashboard
- */
-/**
- * Get filmmaker dashboard summary
+ * Get filmmaker dashboard summary - WITH 6% GATEWAY FEE DEDUCTION
  * GET /filmmaker/dashboard
  */
 export const getFilmmmakerDashboard = async (req, res) => {
   try {
-    const filmmaker = await User.findByPk(req.userId);
+    const GATEWAY_FEE_PERCENT = 6; // 6% MTN gateway fee
+    
+    const filmmaker = await User.findByPk(req.user.id || req.userId);
 
     if (!filmmaker || filmmaker.role !== "filmmaker") {
-      return res.status(404).json({ message: "Filmmaker not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
     }
 
     // Get movie statistics
     const movies = await Movie.findAll({
-      where: { filmmakerId: req.userId },
-      attributes: ["totalViews", "totalDownloads", "totalRevenue", "avgRating"]
+      where: { filmmakerId: req.user.id || req.userId },
+      attributes: [
+        "id", "title", "totalViews", "totalRevenue", 
+        "avgRating", "totalReviews", "viewPrice", "status", 
+        "createdAt", "royaltyPercentage"
+      ]
     });
 
-    // Initialize with 0 values to handle empty results
-    const totalViews = movies.reduce((sum, m) => sum + (parseFloat(m.totalViews) || 0), 0);
-    const totalDownloads = movies.reduce((sum, m) => sum + (parseFloat(m.totalDownloads) || 0), 0);
-    const totalRevenue = movies.reduce((sum, m) => sum + (parseFloat(m.totalRevenue) || 0), 0);
+    // Calculate totals using safeParseNumber
+    const totalViews = movies.reduce((sum, movie) => {
+      return sum + safeParseNumber(movie.totalViews);
+    }, 0);
 
-    // Calculate filmmaker earnings (90% of revenue, 10% platform fee)
-    const platformFeePercentage = filmmaker.filmmmakerFinancePlatformFeePercentage || 10;
-    const platformFee = (totalRevenue * platformFeePercentage) / 100;
-    const filmmmakerEarnings = totalRevenue - platformFee;
+    let totalRevenue = movies.reduce((sum, movie) => {
+      return sum + safeParseNumber(movie.totalRevenue);
+    }, 0);
+
+    const totalMovies = movies.length;
+
+    // Calculate average rating properly
+    const totalRatingSum = movies.reduce((sum, movie) => {
+      return sum + safeParseNumber(movie.avgRating);
+    }, 0);
+    const avgRating = totalMovies > 0 ? totalRatingSum / totalMovies : 0;
+
+    // APPLY 6% GATEWAY FEE DEDUCTION TO TOTAL REVENUE
+    const gatewayFee = (totalRevenue * GATEWAY_FEE_PERCENT) / 100;
+    const revenueAfterGatewayFee = totalRevenue - gatewayFee;
+
+    // Calculate filmmaker earnings from revenue after gateway fee
+    let filmmmakerEarnings = 0;
+    let totalRoyaltyPercentage = 0;
+    
+    if (totalMovies > 0) {
+      // Calculate total royalty percentage
+      totalRoyaltyPercentage = movies.reduce((sum, movie) => {
+        const royalty = safeParseNumber(movie.royaltyPercentage);
+        return sum + (royalty > 0 ? royalty : 70); // Default 70%
+      }, 0);
+      
+      const avgRoyaltyPercentage = totalRoyaltyPercentage / totalMovies;
+      const platformFeePercentage = 100 - avgRoyaltyPercentage;
+      const platformFee = (revenueAfterGatewayFee * platformFeePercentage) / 100;
+      filmmmakerEarnings = revenueAfterGatewayFee - platformFee;
+    }
 
     // Get payment history
     const payments = await Payment.findAll({
       where: {
-        userId: req.userId,
+        filmmakerId: req.user.id || req.userId,
         paymentStatus: "succeeded"
-      }
+      },
+      attributes: ["id", "amount", "paymentMethod", "createdAt"]
     });
 
     const totalSales = payments.length;
 
-    // Ensure all values are numbers before using .toFixed()
-    const formatCurrency = (value) => {
-      const num = parseFloat(value) || 0;
-      return num.toFixed(2);
-    };
+    // Get recent movies with proper numeric values
+    const recentMovies = movies.slice(0, 5).map(movie => {
+      const movieRevenue = safeParseNumber(movie.totalRevenue);
+      const movieGatewayFee = (movieRevenue * GATEWAY_FEE_PERCENT) / 100;
+      const movieRevenueAfterFee = movieRevenue - movieGatewayFee;
+      
+      return {
+        id: movie.id,
+        title: movie.title,
+        views: safeParseNumber(movie.totalViews),
+        revenue: parseFloat(movieRevenueAfterFee.toFixed(2)), // Revenue after 6% deduction
+        grossRevenue: parseFloat(movieRevenue.toFixed(2)), // Original revenue
+        rating: safeParseNumber(movie.avgRating),
+        status: movie.status,
+        createdAt: movie.createdAt
+      };
+    });
+
+    // Calculate performance metrics with 6% deduction
+    let bestPerforming = null;
+    let recentlyAdded = null;
+    
+    if (totalMovies > 0) {
+      // Find best performing by revenue (after gateway fee)
+      bestPerforming = movies.reduce((best, current) => {
+        const currentRevenue = safeParseNumber(current.totalRevenue);
+        const bestRevenue = best ? safeParseNumber(best.totalRevenue) : 0;
+        return currentRevenue > bestRevenue ? current : best;
+      }, null);
+      
+      // Find most recently added
+      const sortedByDate = [...movies].sort((a, b) => 
+        new Date(b.createdAt) - new Date(a.createdAt)
+      );
+      recentlyAdded = sortedByDate[0];
+    }
+
+    // Calculate best performing revenue after gateway fee
+    let bestPerformingData = null;
+    if (bestPerforming) {
+      const bestRevenue = safeParseNumber(bestPerforming.totalRevenue);
+      const bestGatewayFee = (bestRevenue * GATEWAY_FEE_PERCENT) / 100;
+      const bestRevenueAfterFee = bestRevenue - bestGatewayFee;
+      
+      bestPerformingData = {
+        id: bestPerforming.id,
+        title: bestPerforming.title,
+        revenue: parseFloat(bestRevenueAfterFee.toFixed(2)),
+        views: safeParseNumber(bestPerforming.totalViews)
+      };
+    }
+
+    // Calculate royalty percentage for response
+    const avgRoyaltyPercentage = totalMovies > 0 
+      ? totalRoyaltyPercentage / totalMovies 
+      : 70;
+    const platformFee = revenueAfterGatewayFee - filmmmakerEarnings;
+
+    // APPLY 6% TO FILMMAKER BALANCE FIELDS
+    const pendingBalance = safeParseNumber(filmmaker.filmmmakerFinancePendingBalance);
+    const pendingBalanceAfterFee = pendingBalance - (pendingBalance * GATEWAY_FEE_PERCENT / 100);
+    
+    const withdrawnBalance = safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance);
+    const withdrawnBalanceAfterFee = withdrawnBalance - (withdrawnBalance * GATEWAY_FEE_PERCENT / 100);
 
     res.status(200).json({
-      summary: {
-        totalMovies: movies.length,
-        totalViews,
-        totalDownloads,
-        totalSales,
-        totalRevenue: formatCurrency(totalRevenue),
-        filmmmakerEarnings: formatCurrency(filmmmakerEarnings),
-        platformFee: formatCurrency(platformFee),
-      },
-      finance: {
-        pendingBalance: parseFloat(filmmaker.filmmmakerFinancePendingBalance) || 0,
-        withdrawnBalance: parseFloat(filmmaker.filmmmakerFinanceWithdrawnBalance) || 0,
-        totalEarned: parseFloat(filmmaker.filmmmakerFinanceTotalEarned) || 0,
-        minimumWithdrawalAmount:
-          parseFloat(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100,
-        canWithdraw:
-          (parseFloat(filmmaker.filmmmakerFinancePendingBalance) || 0) >=
-          (parseFloat(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100),
-      },
-      approval: {
-        status: filmmaker.approvalStatus,
-        isVerified: filmmaker.filmmmakerIsVerified,
-        bankVerified: filmmaker.filmmmakerBankDetails?.isVerified || false,
-      },
-      movies: movies.map((m) => ({
-        id: m.id,
-        title: m.title,
-        views: parseFloat(m.totalViews) || 0,
-        downloads: parseFloat(m.totalDownloads) || 0,
-        revenue: formatCurrency(m.totalRevenue),
-        rating: parseFloat(m.avgRating) || 0,
-      })),
+      success: true,
+      data: {
+        user: {
+          id: filmmaker.id,
+          name: filmmaker.name,
+          email: filmmaker.email
+        },
+        summary: {
+          totalMovies,
+          totalViews,
+          totalSales,
+          grossRevenue: parseFloat(totalRevenue.toFixed(2)), // Before gateway fee
+          gatewayFee: parseFloat(gatewayFee.toFixed(2)),
+          totalRevenue: parseFloat(revenueAfterGatewayFee.toFixed(2)), // After 6% deduction
+          filmmmakerEarnings: parseFloat(filmmmakerEarnings.toFixed(2)),
+          platformFee: parseFloat(platformFee.toFixed(2)),
+          royaltyPercentage: parseFloat(avgRoyaltyPercentage.toFixed(1)),
+          avgRating: parseFloat(avgRating.toFixed(1)),
+        },
+        finance: {
+          grossPendingBalance: parseFloat(pendingBalance.toFixed(2)),
+          availableBalance: parseFloat(pendingBalanceAfterFee.toFixed(2)), // After 6% deduction
+          pendingBalance: parseFloat(pendingBalanceAfterFee.toFixed(2)), // After 6% deduction
+          grossWithdrawnBalance: parseFloat(withdrawnBalance.toFixed(2)),
+          withdrawnBalance: parseFloat(withdrawnBalanceAfterFee.toFixed(2)), // After 6% deduction
+          totalEarned: parseFloat(filmmmakerEarnings.toFixed(2)),
+          minimumWithdrawalAmount: safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100,
+          canWithdraw: pendingBalanceAfterFee >= 
+                       (safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100),
+          payoutMethod: filmmaker.filmmmakerFinancePayoutMethod || "bank_transfer",
+          gatewayFeePercent: GATEWAY_FEE_PERCENT,
+        },
+        approval: {
+          status: filmmaker.approvalStatus || "pending",
+          isVerified: filmmaker.filmmmakerIsVerified || false,
+          bankVerified: filmmaker.filmmmakerBankDetails?.isVerified || false,
+        },
+        recentMovies,
+        performance: {
+          bestPerforming: bestPerformingData,
+          recentlyAdded: recentlyAdded ? {
+            id: recentlyAdded.id,
+            title: recentlyAdded.title,
+            createdAt: recentlyAdded.createdAt
+          } : null
+        }
+      }
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("Error in getFilmmmakerDashboard:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
+  }
+};
+
+// ====== FILMMAKER REVENUE & WITHDRAWAL MANAGEMENT ======
+
+/**
+ * Get filmmaker financial summary with 6% gateway fee deduction
+ * GET /filmmaker/finance
+ */
+export const getFinancialSummary = async (req, res) => {
+  try {
+    const GATEWAY_FEE_PERCENT = 6; // 6% MTN gateway fee
+    
+    const filmmaker = await User.findByPk(req.user.id || req.userId);
+
+    if (!filmmaker || filmmaker.role !== "filmmaker") {
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
+    }
+
+    const filmmakerId = req.user.id || req.userId;
+
+    // Get payments with proper numeric calculations
+    const payments = await Payment.findAll({
+      where: { 
+        filmmakerId, 
+        paymentStatus: 'succeeded' 
+      },
+      attributes: [
+        'amount',
+        'paymentMethod',
+      ]
+    });
+
+    // Calculate sums with 6% gateway fee deduction
+    let paymentsGrossTotal = 0;
+    let paymentsNetTotal = 0; // After 6% gateway fee
+    let totalGatewayFees = 0;
+    let paymentsFilmmakerTotal = 0;
+    
+    payments.forEach(payment => {
+      const amount = safeParseNumber(payment.amount);
+      paymentsGrossTotal += amount;
+      
+      // Deduct 6% gateway fee from each payment
+      const gatewayFee = (amount * GATEWAY_FEE_PERCENT) / 100;
+      const amountAfterGatewayFee = amount - gatewayFee;
+      paymentsNetTotal += amountAfterGatewayFee;
+      totalGatewayFees += gatewayFee;
+      
+      // Use filmmaker amount if available, otherwise use amount after gateway fee
+      const filmmakerAmount = safeParseNumber(payment.filmmakerAmount);
+      if (filmmakerAmount > 0) {
+        const filmmakerGatewayFee = (filmmakerAmount * GATEWAY_FEE_PERCENT) / 100;
+        paymentsFilmmakerTotal += (filmmakerAmount - filmmakerGatewayFee);
+      } else {
+        paymentsFilmmakerTotal += amountAfterGatewayFee;
+      }
+    });
+
+    // Calculate average royalty from payments
+    let royaltySum = 0;
+    let validRoyaltyCount = 0;
+    
+    payments.forEach(p => {
+      const royalty = safeParseNumber(p.royaltyPercentage);
+      if (royalty > 0) {
+        royaltySum += royalty;
+        validRoyaltyCount++;
+      }
+    });
+    
+    const avgRoyaltyFromPayments = validRoyaltyCount > 0 ? royaltySum / validRoyaltyCount : 0;
+
+    // Fallback to movie totals if payments are not available
+    const movies = await Movie.findAll({
+      where: { filmmakerId },
+      attributes: ["totalRevenue", "royaltyPercentage"]
+    });
+
+    let moviesGrossRevenue = 0;
+    let moviesRoyaltySum = 0;
+    let validMovieRoyaltyCount = 0;
+    
+    movies.forEach(m => {
+      moviesGrossRevenue += safeParseNumber(m.totalRevenue);
+      const royalty = safeParseNumber(m.royaltyPercentage);
+      if (royalty > 0) {
+        moviesRoyaltySum += royalty;
+        validMovieRoyaltyCount++;
+      }
+    });
+
+    // Apply 6% gateway fee to movie revenue
+    const moviesGatewayFee = (moviesGrossRevenue * GATEWAY_FEE_PERCENT) / 100;
+    const moviesNetRevenue = moviesGrossRevenue - moviesGatewayFee;
+
+    // Use payment total if available (already has gateway fee deducted), otherwise use movie total
+    const grossRevenue = paymentsGrossTotal > 0 ? paymentsGrossTotal : moviesGrossRevenue;
+    const totalRevenue = paymentsNetTotal > 0 ? paymentsNetTotal : moviesNetRevenue;
+    const calculatedGatewayFees = paymentsGrossTotal > 0 ? totalGatewayFees : moviesGatewayFee;
+
+    // Calculate average royalty - prefer from payments, fallback to movies
+    let avgRoyalty = avgRoyaltyFromPayments;
+    if (avgRoyalty === 0 && validMovieRoyaltyCount > 0) {
+      avgRoyalty = moviesRoyaltySum / validMovieRoyaltyCount;
+    } else if (avgRoyalty === 0) {
+      avgRoyalty = 70; // Default
+    }
+
+    // Filmmaker earnings calculation (already includes gateway fee deduction)
+    let filmmmakerEarnings = 0;
+    if (paymentsFilmmakerTotal > 0) {
+      filmmmakerEarnings = paymentsFilmmakerTotal;
+    } else if (totalRevenue > 0 && avgRoyalty > 0) {
+      // Calculate from royalty percentage on revenue after gateway fee
+      filmmmakerEarnings = (totalRevenue * avgRoyalty) / 100;
+    }
+
+    // APPLY 6% DEDUCTION TO FILMMAKER BALANCE FIELDS
+    const grossPendingBalance = safeParseNumber(filmmaker.filmmmakerFinancePendingBalance);
+    const pendingBalance = grossPendingBalance - (grossPendingBalance * GATEWAY_FEE_PERCENT / 100);
+    
+    const grossWithdrawnBalance = safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance);
+    const withdrawnBalance = grossWithdrawnBalance - (grossWithdrawnBalance * GATEWAY_FEE_PERCENT / 100);
+    
+    const grossTotalEarned = safeParseNumber(filmmaker.filmmmakerFinanceTotalEarned);
+    const totalEarned = grossTotalEarned > 0 
+      ? grossTotalEarned - (grossTotalEarned * GATEWAY_FEE_PERCENT / 100)
+      : filmmmakerEarnings;
+    
+    const minimumWithdrawalAmount = safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100;
+
+    // Calculate current balance after fee
+    const currentBalance = pendingBalance + withdrawnBalance;
+
+    // Calculate platform fee (on revenue after gateway fee)
+    const platformFee = totalRevenue > 0 ? totalRevenue - filmmmakerEarnings : 0;
+
+    // Format with fixed decimals
+    const formatNumber = (num) => parseFloat(safeParseNumber(num).toFixed(2));
+    const formatPercent = (num) => parseFloat(safeParseNumber(num).toFixed(1));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        balance: {
+          grossPendingBalance: formatNumber(grossPendingBalance),
+          pendingBalance: formatNumber(pendingBalance), // After 6% deduction
+          grossWithdrawnBalance: formatNumber(grossWithdrawnBalance),
+          withdrawnBalance: formatNumber(withdrawnBalance), // After 6% deduction
+          grossTotalEarned: formatNumber(grossTotalEarned),
+          totalEarned: formatNumber(totalEarned), // After 6% deduction
+          calculatedEarnings: formatNumber(filmmmakerEarnings),
+          currentBalance: formatNumber(currentBalance), // After 6% deduction
+          availableBalance: formatNumber(pendingBalance), // After 6% deduction
+          gatewayFeePercent: GATEWAY_FEE_PERCENT,
+        },
+        withdrawalSettings: {
+          minimumAmount: formatNumber(minimumWithdrawalAmount),
+          payoutMethod: filmmaker.filmmmakerFinancePayoutMethod || "bank_transfer",
+          lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate,
+          canWithdraw: pendingBalance >= minimumWithdrawalAmount,
+          nextPayoutDate: filmmaker.filmmmakerFinanceNextPayoutDate,
+        },
+        bankDetails: filmmaker.filmmmakerBankDetails || {},
+        revenueSummary: {
+          grossRevenue: formatNumber(grossRevenue),
+          totalMovieRevenue: formatNumber(totalRevenue), // After 6% deduction
+          averageRoyalty: `${formatPercent(avgRoyalty)}%`,
+          platformFee: `${formatPercent(100 - avgRoyalty)}%`,
+          platformFeeAmount: formatNumber(platformFee),
+          gatewayFee: `${GATEWAY_FEE_PERCENT}%`,
+          totalGatewayFees: formatNumber(calculatedGatewayFees),
+          estimatedMonthly: formatNumber(totalEarned / 30),
+        },
+        feeBreakdown: {
+          grossRevenue: formatNumber(grossRevenue),
+          gatewayFees: formatNumber(calculatedGatewayFees),
+          revenueAfterGatewayFee: formatNumber(totalRevenue),
+          platformFee: formatNumber(platformFee),
+          filmmakerEarnings: formatNumber(filmmmakerEarnings),
+        },
+        // Debug info to verify calculations
+        _debug: {
+          paymentsCount: payments.length,
+          paymentsGrossTotal: formatNumber(paymentsGrossTotal),
+          paymentsNetTotal: formatNumber(paymentsNetTotal),
+          gatewayFeePercent: GATEWAY_FEE_PERCENT,
+          totalGatewayFees: formatNumber(calculatedGatewayFees),
+          expectedCalculation: `Example: 4 payments of 5 each = 20 gross, ${GATEWAY_FEE_PERCENT}% fee = ${formatNumber(20 * GATEWAY_FEE_PERCENT / 100)}, net = ${formatNumber(20 - (20 * GATEWAY_FEE_PERCENT / 100))}`
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Error in getFinancialSummary:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
 
@@ -215,28 +552,42 @@ export const getMovieAnalytics = async (req, res) => {
   try {
     const { movieId } = req.params;
 
-    const movie = await Movie.findByPk(movieId);
+    const movie = await Movie.findByPk(movieId, {
+      attributes: ["id", "title", "description", "status", "totalViews", "totalRevenue", "avgRating", "totalReviews", "createdAt", "viewPrice", "downloadPrice", "currency", "royaltyPercentage", "filmmakerId"]
+    });
 
     if (!movie) {
-      return res.status(404).json({ message: "Movie not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Movie not found" 
+      });
     }
 
     // Check ownership
-    if (movie.filmmakerId !== req.userId) {
-      return res.status(403).json({ message: "Not authorized" });
+    if (movie.filmmakerId !== (req.user.id || req.userId)) {
+      return res.status(403).json({ 
+        success: false,
+        message: "Not authorized to view analytics for this movie" 
+      });
     }
 
-    // Get payment data for this movie
+    // Get payment data for this movie - FIXED CALCULATION
     const payments = await Payment.findAll({
       where: {
         movieId: movieId,
         paymentStatus: "succeeded"
-      }
+      },
+      attributes: ["id", "amount", "paymentMethod", "userId", "createdAt"]
     });
 
-    const totalRevenue = payments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
-    const filmmaker = await User.findByPk(req.userId);
-    const platformFeePercentage = filmmaker.filmmmakerFinancePlatformFeePercentage || 10;
+    // FIXED: Convert each amount to number before summing
+    let totalRevenue = 0;
+    payments.forEach(payment => {
+      totalRevenue += safeParseNumber(payment.amount);
+    });
+    
+    const royaltyPercentage = safeParseNumber(movie.royaltyPercentage) || 70;
+    const platformFeePercentage = 100 - royaltyPercentage;
     const platformFee = (totalRevenue * platformFeePercentage) / 100;
     const filmmmakerShare = totalRevenue - platformFee;
 
@@ -248,73 +599,74 @@ export const getMovieAnalytics = async (req, res) => {
       }
     });
 
-    // Helper function to format currency
-    const formatCurrency = (value) => {
-      const num = parseFloat(value) || 0;
-      return num.toFixed(2);
-    };
+    // Get payment timeline (last 30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    const recentPayments = payments.filter(p => 
+      new Date(p.createdAt) >= thirtyDaysAgo
+    );
+
+    // Calculate recent revenue properly
+    let recentRevenue = 0;
+    recentPayments.forEach(payment => {
+      recentRevenue += safeParseNumber(payment.amount);
+    });
 
     res.status(200).json({
-      movie: {
-        id: movie.id,
-        title: movie.title,
-        status: movie.status,
-        totalViews: parseFloat(movie.totalViews) || 0,
-        totalDownloads: parseFloat(movie.totalDownloads) || 0,
-        avgRating: parseFloat(movie.avgRating) || 0,
-        reviewCount: parseFloat(movie.reviewCount) || 0,
-      },
-      revenue: {
-        totalRevenue: formatCurrency(totalRevenue),
-        filmmmakerShare: formatCurrency(filmmmakerShare),
-        platformFee: formatCurrency(platformFee),
-        platformFeePercentage: platformFeePercentage,
-      },
-      sales: {
-        totalSales: payments.length,
-        byPaymentMethod: paymentsByMethod,
-        averageSalePrice:
-          payments.length > 0 ? formatCurrency(totalRevenue / payments.length) : "0.00",
-      },
+      success: true,
+      data: {
+        movie: {
+          id: movie.id,
+          title: movie.title,
+          description: movie.description,
+          status: movie.status,
+          totalViews: safeParseNumber(movie.totalViews),
+          totalRevenue: safeParseNumber(movie.totalRevenue),
+          avgRating: safeParseNumber(movie.avgRating),
+          reviewCount: safeParseNumber(movie.totalReviews),
+          createdAt: movie.createdAt,
+          price: {
+            viewPrice: safeParseNumber(movie.viewPrice),
+            downloadPrice: safeParseNumber(movie.downloadPrice),
+            currency: movie.currency
+          }
+        },
+        revenue: {
+          totalRevenue: safeParseNumber(totalRevenue).toFixed(2),
+          filmmmakerShare: safeParseNumber(filmmmakerShare).toFixed(2),
+          platformFee: safeParseNumber(platformFee).toFixed(2),
+          royaltyPercentage,
+          platformFeePercentage,
+        },
+        sales: {
+          totalSales: payments.length,
+          byPaymentMethod: paymentsByMethod,
+          averageSalePrice: payments.length > 0 ? (safeParseNumber(totalRevenue) / payments.length).toFixed(2) : "0.00",
+          recentSales: recentPayments.length,
+          revenueTrend: recentPayments.length > 0 ? 
+            (safeParseNumber(recentRevenue) / 30).toFixed(2) : "0.00"
+        },
+        timeline: {
+          createdAt: movie.createdAt,
+          lastPayment: payments.length > 0 ? 
+            payments.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0].createdAt : null,
+          daysSinceCreated: Math.floor((new Date() - new Date(movie.createdAt)) / (1000 * 60 * 60 * 24))
+        }
+      }
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("Error in getMovieAnalytics:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
 
 // ====== FILMMAKER REVENUE & WITHDRAWAL MANAGEMENT ======
 
-/**
- * Get filmmaker financial summary
- * GET /filmmaker/finance
- */
-export const getFinancialSummary = async (req, res) => {
-  try {
-    const filmmaker = await User.findByPk(req.userId);
-
-    if (!filmmaker || filmmaker.role !== "filmmaker") {
-      return res.status(404).json({ message: "Filmmaker not found" });
-    }
-
-    res.status(200).json({
-      balance: {
-        pendingBalance: filmmaker.filmmmakerFinancePendingBalance,
-        withdrawnBalance: filmmaker.filmmmakerFinanceWithdrawnBalance,
-        totalEarned: filmmaker.filmmmakerFinanceTotalEarned,
-        currentBalance: filmmaker.filmmmakerFinancePendingBalance + filmmaker.filmmmakerFinanceWithdrawnBalance,
-      },
-      withdrawalSettings: {
-        minimumAmount: filmmaker.filmmmakerFinanceMinimumWithdrawalAmount,
-        payoutMethod: filmmaker.filmmmakerFinancePayoutMethod,
-        lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate,
-        canWithdraw: filmmaker.filmmmakerFinancePendingBalance >= filmmaker.filmmmakerFinanceMinimumWithdrawalAmount,
-      },
-      bankDetails: filmmaker.filmmmakerBankDetails || {},
-    });
-  } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
 
 /**
  * Request withdrawal (creates withdrawal request)
@@ -325,66 +677,94 @@ export const requestWithdrawal = async (req, res) => {
     const { error, value } = withdrawalSchema.validate(req.body);
     if (error) {
       return res.status(400).json({
+        success: false,
         message: "Validation error",
         error: error.details.map((d) => d.message).join(", "),
       });
     }
 
-    const filmmaker = await User.findByPk(req.userId);
+    const filmmaker = await User.findByPk(req.user.id || req.userId);
 
     if (!filmmaker || filmmaker.role !== "filmmaker") {
-      return res.status(404).json({ message: "Filmmaker not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
     }
 
     // Check if verified
-    if (!filmmaker.filmmmakerBankDetails?.isVerified) {
+    if (!filmmaker.filmmmakerBankDetails?.isVerified || !filmmaker.filmmmakerIsVerified) {
       return res.status(400).json({
+        success: false,
         message: "Bank details must be verified before withdrawal",
+        requiredAction: "Submit and verify bank details first"
       });
     }
 
     // Check minimum balance
-    if (value.amount < filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) {
+    const minimumAmount = safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100;
+    if (value.amount < minimumAmount) {
       return res.status(400).json({
-        message: `Minimum withdrawal amount is ${filmmaker.filmmmakerFinanceMinimumWithdrawalAmount}`,
-        minimumAmount: filmmaker.filmmmakerFinanceMinimumWithdrawalAmount,
+        success: false,
+        message: `Minimum withdrawal amount is ${minimumAmount}`,
+        minimumAmount,
         requestedAmount: value.amount,
       });
     }
 
     // Check available balance
-    if (value.amount > filmmaker.filmmmakerFinancePendingBalance) {
+    const pendingBalance = safeParseNumber(filmmaker.filmmmakerFinancePendingBalance);
+    if (value.amount > pendingBalance) {
       return res.status(400).json({
+        success: false,
         message: "Insufficient balance for withdrawal",
-        availableBalance: filmmaker.filmmmakerFinancePendingBalance,
+        availableBalance: pendingBalance,
         requestedAmount: value.amount,
+        difference: pendingBalance - value.amount
       });
     }
 
-    // Create withdrawal request (in production, this would be a separate model)
-    // For now, we'll update the user document
-    filmmaker.filmmmakerFinancePendingBalance = filmmaker.filmmmakerFinancePendingBalance - value.amount;
+    // Create withdrawal request
+    const withdrawalRequest = {
+      id: `WDR-${Date.now()}`,
+      amount: safeParseNumber(value.amount),
+      payoutMethod: value.payoutMethod || filmmaker.filmmmakerFinancePayoutMethod,
+      status: "pending",
+      submittedAt: new Date(),
+      estimatedTime: "3-5 business days",
+      notes: value.notes
+    };
+
+    // Update the user document
+    filmmaker.filmmmakerFinancePendingBalance = pendingBalance - safeParseNumber(value.amount);
     filmmaker.filmmmakerFinanceLastWithdrawalDate = new Date();
-    filmmaker.filmmmakerFinancePayoutMethod = value.payoutMethod;
+    filmmaker.filmmmakerFinancePayoutMethod = value.payoutMethod || filmmaker.filmmmakerFinancePayoutMethod;
+    
+    // Store withdrawal history
+    const withdrawalHistory = filmmaker.filmmmakerFinanceWithdrawalHistory || [];
+    withdrawalHistory.push(withdrawalRequest);
+    filmmaker.filmmmakerFinanceWithdrawalHistory = withdrawalHistory;
+    
     await filmmaker.save();
 
     res.status(201).json({
+      success: true,
       message: "Withdrawal request submitted successfully",
-      withdrawal: {
-        amount: value.amount,
-        payoutMethod: value.payoutMethod,
-        status: "pending",
-        submittedAt: new Date(),
-        estimatedTime: "3-5 business days",
-      },
-      newBalance: {
-        pendingBalance: filmmaker.filmmmakerFinancePendingBalance,
-        withdrawnBalance: filmmaker.filmmmakerFinanceWithdrawnBalance,
-        totalEarned: filmmaker.filmmmakerFinanceTotalEarned,
-      },
+      data: {
+        withdrawal: withdrawalRequest,
+        newBalance: {
+          pendingBalance: safeParseNumber(filmmaker.filmmmakerFinancePendingBalance),
+          withdrawnBalance: safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance) + safeParseNumber(value.amount),
+          totalEarned: safeParseNumber(filmmaker.filmmmakerFinanceTotalEarned) || 0,
+        },
+      }
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
 
@@ -394,66 +774,245 @@ export const requestWithdrawal = async (req, res) => {
  */
 export const getWithdrawalHistory = async (req, res) => {
   try {
-    const filmmaker = await User.findByPk(req.userId, {
-      attributes: ["filmmmakerFinanceWithdrawnBalance", "filmmmakerFinanceLastWithdrawalDate", "filmmmakerFinancePayoutMethod"]
-    });
+    const filmmaker = await User.findByPk(req.user.id || req.userId);
 
     if (!filmmaker) {
-      return res.status(404).json({ message: "Filmmaker not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
     }
 
-    // In production, fetch from Withdrawal model
-    // For now, return basic info
+    const withdrawalHistory = filmmaker.filmmmakerFinanceWithdrawalHistory || [];
+    
+    // FIXED: Convert amounts to numbers before summing
+    let totalWithdrawn = 0;
+    withdrawalHistory.forEach(w => {
+      if (w.status === "completed") {
+        totalWithdrawn += safeParseNumber(w.amount);
+      }
+    });
+
     res.status(200).json({
-      withdrawnBalance: filmmaker.filmmmakerFinanceWithdrawnBalance,
-      lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate,
-      payoutMethod: filmmaker.filmmmakerFinancePayoutMethod,
-      message: "Withdrawal details stored in user account",
+      success: true,
+      data: {
+        withdrawnBalance: safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance),
+        lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate,
+        payoutMethod: filmmaker.filmmmakerFinancePayoutMethod,
+        totalWithdrawn: safeParseNumber(totalWithdrawn).toFixed(2),
+        withdrawalHistory: withdrawalHistory.map(w => ({
+          ...w,
+          amount: safeParseNumber(w.amount)
+        })),
+        pendingWithdrawals: withdrawalHistory.filter(w => w.status === "pending").length,
+        completedWithdrawals: withdrawalHistory.filter(w => w.status === "completed").length
+      }
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
 
 // ====== FILMMAKER MOVIE MANAGEMENT ======
 
 /**
- * Get all movies by filmmaker
+ * Get all filmmaker content (movies and series with episodes)
  * GET /filmmaker/movies
  */
 export const getFilmmmakerMovies = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status } = req.query;
+    const { page = 1, limit = 50, status } = req.query;
 
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
-    const skip = (pageNum - 1) * limitNum;
+    const offset = (pageNum - 1) * limitNum;
 
-    let where = { filmmakerId: req.userId };
+    // Get movies and series (NO episodes directly)
+    const where = { 
+      filmmakerId: req.user.id || req.userId,
+      contentType: { [Op.in]: ["movie", "series"] } // Only movies and series
+    };
+    
     if (status) where.status = status;
 
-    const movies = await Movie.findAll({
+    const { count, rows: content } = await Movie.findAndCountAll({
       where,
-      attributes: ["title", "overview", "poster", "backdrop", "status", "totalViews","videoDuration", "totalDownloads", "totalRevenue", "avgRating", "createdAt", "viewPrice", "downloadPrice", "currency"],
+      attributes: [
+        "id", "title", "description", "poster", "backdrop", 
+        "status", "totalViews", "videoDuration", "totalRevenue", 
+        "avgRating", "totalReviews", "createdAt", "viewPrice", 
+        "downloadPrice", "currency", "contentType", "slug",
+        "seasonNumber", "episodeNumber"
+      ],
       order: [['createdAt', 'DESC']],
-      offset: skip,
+      offset,
       limit: limitNum
     });
 
-    const total = await Movie.count({ where });
+    // Get episodes for all series
+    const seriesIds = content.filter(item => item.contentType === "series").map(s => s.id);
+    let episodesBySeries = {};
+    
+    if (seriesIds.length > 0) {
+      const episodes = await Movie.findAll({
+        where: {
+          seriesId: { [Op.in]: seriesIds },
+          contentType: "episode",
+          status: "approved"
+        },
+        attributes: [
+          "id", "title", "description", "poster", "backdrop", 
+          "status", "totalViews", "videoDuration", "totalRevenue", 
+          "avgRating", "totalReviews", "createdAt", "viewPrice", 
+          "downloadPrice", "currency", "slug",
+          "seriesId", "seasonNumber", "episodeNumber"
+        ],
+        order: [
+          ["seriesId", "ASC"],
+          ["seasonNumber", "ASC"],
+          ["episodeNumber", "ASC"]
+        ]
+      });
+
+      // Group episodes by seriesId
+      episodesBySeries = episodes.reduce((acc, episode) => {
+        const seriesId = episode.seriesId;
+        if (!acc[seriesId]) acc[seriesId] = [];
+        acc[seriesId].push(episode);
+        return acc;
+      }, {});
+    }
+
+    // Transform the response
+    const transformedContent = content.map(item => {
+      const base = {
+        id: item.id,
+        title: item.title,
+        slug: item.slug,
+        description: item.description || item.overview,
+        overview: item.overview || item.description,
+        poster: item.poster,
+        backdrop: item.backdrop,
+        status: item.status,
+        totalViews: safeParseNumber(item.totalViews),
+        videoDuration: safeParseNumber(item.videoDuration),
+        totalRevenue: safeParseNumber(item.totalRevenue),
+        avgRating: safeParseNumber(item.avgRating),
+        totalReviews: safeParseNumber(item.totalReviews),
+        createdAt: item.createdAt,
+        viewPrice: safeParseNumber(item.viewPrice),
+        downloadPrice: safeParseNumber(item.downloadPrice),
+        currency: item.currency,
+        contentType: item.contentType,
+      };
+
+      if (item.contentType === "series") {
+        return {
+          ...base,
+          totalSeasons: item.totalSeasons,
+          totalEpisodes: item.totalEpisodes,
+          episodes: episodesBySeries[item.id] || [], // Include episodes
+        };
+      }
+
+      return base; // Movie
+    });
 
     res.status(200).json({
       success: true,
-      data: movies,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        pages: Math.ceil(total / limitNum),
+      data: {
+        movies: transformedContent, // Contains movies and series with episodes
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total: count,
+          pages: Math.ceil(count / limitNum),
+        },
       },
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("Error in getFilmmmakerMovies:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
+  }
+};
+
+export const getSeriesEpisodes = async (req, res) => {
+  try {
+    const { seriesId } = req.params;
+
+    // Get series info
+    const series = await Movie.findByPk(seriesId, {
+      attributes: [
+        "id", "title", "description", "poster", "backdrop", 
+        "status", "totalViews","filmmakerId","contentType", "totalRevenue", "avgRating", "totalReviews",
+        "createdAt", "viewPrice", "downloadPrice", "currency", "seasonNumber", "episodeNumber"
+      ]
+    });
+    
+    if (!series || series.contentType !== "series") {
+      return res.status(404).json({
+        success: false,
+        message: "Series not found"
+      });
+    }
+
+    // Check ownership
+    if (series.filmmakerId !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to view this series"
+      });
+    }
+
+    // Get episodes
+    const episodes = await Movie.findAll({
+      where: {
+        seriesId: seriesId,
+        contentType: "episode",
+        status: { [Op.in]: ["approved", "submitted", "pending"] }
+      },
+      attributes: [
+        "id", "title", "description", "poster", "backdrop", 
+        "status", "totalViews", "videoDuration", "totalRevenue", 
+        "avgRating", "totalReviews", "createdAt", "viewPrice", 
+        "downloadPrice", "currency", "slug",
+        "seasonNumber", "episodeNumber"
+      ],
+      order: [
+        ["seasonNumber", "ASC"],
+        ["episodeNumber", "ASC"]
+      ]
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        series,
+        episodes,
+        totalEpisodes: episodes.length,
+        seasons: episodes.reduce((acc, episode) => {
+          const season = episode.seasonNumber || 1;
+          if (!acc[season]) acc[season] = [];
+          acc[season].push(episode);
+          return acc;
+        }, {})
+      }
+    });
+  } catch (error) {
+    console.error("Error in getSeriesEpisodes:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message
+    });
   }
 };
 
@@ -468,43 +1027,62 @@ export const editFilmmmakerMovie = async (req, res) => {
     const movie = await Movie.findByPk(movieId);
 
     if (!movie) {
-      return res.status(404).json({ message: "Movie not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Movie not found" 
+      });
     }
 
     // Check ownership
-    if (movie.filmmakerId !== req.userId) {
-      return res.status(403).json({ message: "Not authorized to edit this movie" });
+    if (movie.filmmakerId !== (req.user.id || req.userId)) {
+      return res.status(403).json({ 
+        success: false,
+        message: "Not authorized to edit this movie" 
+      });
     }
 
     // Allow editing certain fields only
     const allowedFields = [
       "title",
-      "overview",
+      "description",
       "categories",
       "tags",
-      "price",
       "viewPrice",
       "downloadPrice",
       "currency",
-      "allowDownload",
       "language",
+      "royaltyPercentage",
+      "status"
     ];
+    
     const updateData = {};
-
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) {
         updateData[field] = req.body[field];
       }
     });
 
+    // Update legacy price field for backward compatibility
+    if (req.body.viewPrice !== undefined) {
+      updateData.price = safeParseNumber(req.body.viewPrice);
+    }
+
     const updatedMovie = await movie.update(updateData);
 
     res.status(200).json({
+      success: true,
       message: "Movie updated successfully",
-      movie: updatedMovie,
+      data: {
+        movie: updatedMovie
+      }
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("Error in editFilmmmakerMovie:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
 
@@ -514,25 +1092,100 @@ export const editFilmmmakerMovie = async (req, res) => {
  */
 export const getFilmmmakerStats = async (req, res) => {
   try {
-    const filmmaker = await User.findByPk(req.userId, {
-      attributes: ["filmmmakerStatsTotalMovies", "filmmmakerStatsTotalRevenue", "filmmmakerStatsTotalViews", "filmmmakerStatsTotalDownloads", "filmmmakerStatsTotalEarnings", "filmmmakerStatsAverageRating", "filmmmakerStatsTotalReviews"]
-    });
+    const filmmaker = await User.findByPk(req.user.id || req.userId);
 
     if (!filmmaker) {
-      return res.status(404).json({ message: "Filmmaker not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
     }
 
+    // Get movie statistics from actual movies
+    const movies = await Movie.findAll({
+      where: { filmmakerId: req.user.id || req.userId },
+      attributes: [
+        'status',
+        'contentType',
+        [Movie.sequelize.fn('COUNT', Movie.sequelize.col('id')), 'count'],
+        [Movie.sequelize.fn('SUM', Movie.sequelize.col('totalViews')), 'totalViews'],
+        [Movie.sequelize.fn('SUM', Movie.sequelize.col('totalRevenue')), 'totalRevenue'],
+        [Movie.sequelize.fn('AVG', Movie.sequelize.col('avgRating')), 'avgRating']
+      ],
+      group: ['status', 'contentType']
+    });
+
+    // Calculate totals - FIXED
+    const totalMovies = movies.reduce((sum, m) => sum + safeParseNumber(m.dataValues.count), 0);
+    
+    let totalViews = 0;
+    let totalRevenue = 0;
+    let totalRating = 0;
+    let validRatingsCount = 0;
+    
+    movies.forEach(m => {
+      totalViews += safeParseNumber(m.dataValues.totalViews);
+      totalRevenue += safeParseNumber(m.dataValues.totalRevenue);
+      
+      const rating = safeParseNumber(m.dataValues.avgRating);
+      if (!isNaN(rating)) {
+        totalRating += rating;
+        validRatingsCount++;
+      }
+    });
+    
+    const avgRating = validRatingsCount > 0 ? totalRating / validRatingsCount : 0;
+
+    // Get payment statistics - FIXED
+    const payments = await Payment.findAll({
+      where: {
+        filmmakerId: req.user.id || req.userId,
+        paymentStatus: "succeeded"
+      }
+    });
+
+    let totalAmount = 0;
+    payments.forEach(payment => {
+      totalAmount += safeParseNumber(payment.amount);
+    });
+
+    const totalSales = payments.length;
+
     res.status(200).json({
-      totalMovies: filmmaker.filmmmakerStatsTotalMovies,
-      totalRevenue: filmmaker.filmmmakerStatsTotalRevenue,
-      totalViews: filmmaker.filmmmakerStatsTotalViews,
-      totalDownloads: filmmaker.filmmmakerStatsTotalDownloads,
-      totalEarnings: filmmaker.filmmmakerStatsTotalEarnings,
-      averageRating: filmmaker.filmmmakerStatsAverageRating,
-      totalReviews: filmmaker.filmmmakerStatsTotalReviews
+      success: true,
+      data: {
+        totalMovies,
+        totalViews,
+        totalRevenue: safeParseNumber(totalRevenue).toFixed(2),
+        totalSales,
+        filmmmakerEarnings: safeParseNumber(totalAmount).toFixed(2),
+        averageRating: safeParseNumber(avgRating).toFixed(1),
+        byContentType: movies.reduce((acc, m) => {
+          const type = m.contentType || "movie";
+          if (!acc[type]) acc[type] = 0;
+          acc[type] += safeParseNumber(m.dataValues.count);
+          return acc;
+        }, {}),
+        byStatus: movies.reduce((acc, m) => {
+          const status = m.status || "unknown";
+          if (!acc[status]) acc[status] = 0;
+          acc[status] += safeParseNumber(m.dataValues.count);
+          return acc;
+        }, {}),
+        // Debug info
+        _debug: {
+          paymentsCount: payments.length,
+          expectedCalculation: "4 payments of '5' each should equal 20"
+        }
+      }
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error", error: error.message });
+    console.error("Error in getFilmmmakerStats:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
   }
 };
 
@@ -541,20 +1194,6 @@ export const getFilmmmakerStats = async (req, res) => {
 /**
  * Update payment method for filmmaker
  * PUT /filmmaker/payment-method
- *
- * Accepts:
- * {
- *   "payoutMethod": "momo" | "bank_transfer" | "paypal" | "stripe",
- *   "momoPhoneNumber": "+250...",
- *   "bankAccountHolder": "Name",
- *   "bankName": "Bank Name",
- *   "accountNumber": "123456789",
- *   "accountType": "checking" | "savings",
- *   "routingNumber": "...",
- *   "swiftCode": "...",
- *   "country": "...",
- *   "stripeAccountId": "..."
- * }
  */
 export const updatePaymentMethod = async (req, res) => {
   try {
@@ -582,47 +1221,14 @@ export const updatePaymentMethod = async (req, res) => {
       });
     }
 
-    // Validate payment method specific fields
-    if (payoutMethod === "momo") {
-      if (!momoPhoneNumber) {
-        return res.status(400).json({
-          success: false,
-          message: "MoMo phone number is required for MoMo payments",
-          requiredFields: ["momoPhoneNumber"],
-        });
-      }
-    }
-
-    if (payoutMethod === "bank_transfer") {
-      if (!bankAccountHolder || !bankName || !accountNumber || !country) {
-        return res.status(400).json({
-          success: false,
-          message: "Bank details are required for bank transfer",
-          requiredFields: [
-            "bankAccountHolder",
-            "bankName",
-            "accountNumber",
-            "country",
-          ],
-        });
-      }
-    }
-
-    if (payoutMethod === "stripe") {
-      if (!stripeAccountId) {
-        return res.status(400).json({
-          success: false,
-          message: "Stripe account ID is required for Stripe payments",
-          requiredFields: ["stripeAccountId"],
-        });
-      }
-    }
-
     // Update payment method
-    const filmmaker = await User.findByPk(req.userId);
+    const filmmaker = await User.findByPk(req.user.id || req.userId);
 
     if (!filmmaker) {
-      return res.status(404).json({ message: "Filmmaker not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
     }
 
     filmmaker.filmmmakerFinancePayoutMethod = payoutMethod;
@@ -640,6 +1246,7 @@ export const updatePaymentMethod = async (req, res) => {
         routingNumber: routingNumber || "",
         swiftCode: swiftCode || "",
         isVerified: false, // Admin must verify
+        updatedAt: new Date()
       };
     } else if (payoutMethod === "stripe") {
       filmmaker.filmmmakerStripeAccountId = stripeAccountId;
@@ -663,19 +1270,16 @@ export const updatePaymentMethod = async (req, res) => {
     res.status(200).json({
       success: true,
       message: "Payment method updated successfully",
-      paymentMethod: payoutMethod,
-      paymentDetails: responsePaymentDetails,
-      allMethods: {
-        momoPhoneNumber: filmmaker.filmmmakerMomoPhoneNumber || null,
-        bankDetails: filmmaker.filmmmakerBankDetails || null,
-        stripeAccountId: filmmaker.filmmmakerStripeAccountId || null,
-      },
-      nextStep:
-        payoutMethod === "bank_transfer"
+      data: {
+        paymentMethod: payoutMethod,
+        paymentDetails: responsePaymentDetails,
+        nextStep: payoutMethod === "bank_transfer"
           ? "Bank details submitted for admin verification"
           : "Payment method ready to use",
+      }
     });
   } catch (error) {
+    console.error("Error in updatePaymentMethod:", error);
     res.status(500).json({
       success: false,
       message: "Server error",
@@ -690,16 +1294,17 @@ export const updatePaymentMethod = async (req, res) => {
  */
 export const getPaymentMethod = async (req, res) => {
   try {
-    const filmmaker = await User.findByPk(req.userId, {
-      attributes: ["role", "filmmmakerFinancePayoutMethod", "filmmmakerFinancePendingBalance", "filmmmakerFinanceTotalEarned", "filmmmakerFinanceMinimumWithdrawalAmount", "filmmmakerFinanceLastWithdrawalDate", "filmmmakerMomoPhoneNumber", "filmmmakerBankDetails", "filmmmakerStripeAccountId", "filmmmakerPaypalEmail"]
-    });
+    const filmmaker = await User.findByPk(req.user.id || req.userId);
 
     if (!filmmaker || filmmaker.role !== "filmmaker") {
-      return res.status(404).json({ message: "Filmmaker not found" });
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
     }
 
     // Build payment details based on current method
-    const currentMethod = filmmaker.filmmmakerFinancePayoutMethod;
+    const currentMethod = filmmaker.filmmmakerFinancePayoutMethod || "bank_transfer";
     let paymentDetails = {
       momoPhoneNumber: filmmaker.filmmmakerMomoPhoneNumber || null,
       bankDetails: filmmaker.filmmmakerBankDetails || null,
@@ -709,29 +1314,39 @@ export const getPaymentMethod = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      currentMethod: currentMethod,
-      paymentDetails: {
-        [currentMethod]: paymentDetails[currentMethod === "momo" ? "momoPhoneNumber" : currentMethod === "stripe" ? "stripeAccountId" : currentMethod === "paypal" ? "paypalEmail" : "bankDetails"],
-        allMethods: paymentDetails,
-      },
-      financialInfo: {
-        pendingBalance: filmmaker.filmmmakerFinancePendingBalance || 0,
-        totalEarned: filmmaker.filmmmakerFinanceTotalEarned || 0,
-        minimumWithdrawalAmount: filmmaker.filmmmakerFinanceMinimumWithdrawalAmount || 100,
-        lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate || null,
-      },
-      availableMethods: [
-        { id: "bank_transfer", name: "Bank Transfer", description: "Direct bank deposit" },
-        { id: "paypal", name: "PayPal", description: "PayPal account transfer" },
-        { id: "stripe", name: "Stripe", description: "Stripe connected account" },
-        { id: "momo", name: "MTN MoMo", description: "MTN Mobile Money" },
-      ],
+      data: {
+        currentMethod: currentMethod,
+        paymentDetails: {
+          [currentMethod]: currentMethod === "momo" ? paymentDetails.momoPhoneNumber :
+                         currentMethod === "stripe" ? paymentDetails.stripeAccountId :
+                         currentMethod === "paypal" ? paymentDetails.paypalEmail :
+                         paymentDetails.bankDetails,
+          allMethods: paymentDetails,
+        },
+        financialInfo: {
+          pendingBalance: safeParseNumber(filmmaker.filmmmakerFinancePendingBalance),
+          totalEarned: safeParseNumber(filmmaker.filmmmakerFinanceTotalEarned) || 0,
+          minimumWithdrawalAmount: safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100,
+          lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate || null,
+        },
+        verificationStatus: {
+          bankDetails: filmmaker.filmmmakerBankDetails?.isVerified || false,
+          lastVerified: filmmaker.filmmmakerBankDetails?.verifiedAt || null,
+        },
+        availableMethods: [
+          { id: "bank_transfer", name: "Bank Transfer", description: "Direct bank deposit" },
+          { id: "paypal", name: "PayPal", description: "PayPal account transfer" },
+          { id: "stripe", name: "Stripe", description: "Stripe connected account" },
+          { id: "momo", name: "MTN MoMo", description: "MTN Mobile Money" },
+        ],
+      }
     });
   } catch (error) {
+    console.error("Error in getPaymentMethod:", error);
     res.status(500).json({
       success: false,
       message: "Server error",
       error: error.message,
     });
   }
-};
+}

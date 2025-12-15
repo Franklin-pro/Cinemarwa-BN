@@ -10,151 +10,202 @@ const Movie = sequelize.define(
       primaryKey: true,
     },
 
-    // Basic Information
+    filmmakerId: {
+      type: DataTypes.UUID,
+      allowNull: false,
+    },
+
+    // ======= BASIC INFO =======
     title: {
       type: DataTypes.STRING,
       allowNull: false,
     },
-    original_title: DataTypes.STRING,
-    overview: DataTypes.TEXT,
-    release_date: DataTypes.STRING,
-    poster_path: DataTypes.STRING,
-    backdrop_path: DataTypes.STRING,
-    popularity: DataTypes.DECIMAL(10, 2),
-    vote_average: DataTypes.DECIMAL(3, 1),
-    vote_count: DataTypes.INTEGER,
-    adult: {
-      type: DataTypes.BOOLEAN,
-      defaultValue: false,
-    },
-    video: {
-      type: DataTypes.BOOLEAN,
-      defaultValue: false,
-    },
-    genre_ids: {
-      type: DataTypes.JSON,
-      defaultValue: [],
-    },
-    original_language: DataTypes.STRING,
-
-    // Filmmaker Information
-    filmmakerId: DataTypes.UUID,
-    filmmakerName: DataTypes.STRING,
-    filmmakerBio: DataTypes.TEXT,
-    filmmakerProfileImage: DataTypes.STRING,
-
-    // Video/Media Storage
-    streamingUrl: DataTypes.STRING,
-    videoUrl: DataTypes.STRING,
-    hlsUrl: DataTypes.STRING,
-    videoQuality: {
-      type: DataTypes.ENUM("240p", "360p", "480p", "720p", "1080p", "4K"),
-      defaultValue: "720p",
-    },
-    videoDuration: DataTypes.INTEGER,
-    fileSize: DataTypes.DECIMAL(10, 2),
-    uploadedAt: DataTypes.DATE,
-    processingStatus: {
-      type: DataTypes.ENUM("pending", "processing", "completed", "failed"),
-      defaultValue: "pending",
-    },
-
-    // Images
-    poster: DataTypes.STRING,
-    backdrop: DataTypes.STRING,
-    posterPublicId: DataTypes.STRING,
-    backdropPublicId: DataTypes.STRING,
-    thumbnail: DataTypes.STRING,
-
-    // Pricing & Monetization
-    price: {
-      type: DataTypes.DECIMAL(10, 2),
-      defaultValue: 0,
-    },
-    viewPrice: {
-      type: DataTypes.DECIMAL(10, 2),
-      defaultValue: 0,
-    },
-    downloadPrice: {
-      type: DataTypes.DECIMAL(10, 2),
-      defaultValue: 0,
-    },
-    currency: {
-      type: DataTypes.ENUM("RWF", "EUR", "USD"),
-      defaultValue: "RWF",
-    },
-    royaltyPercentage: {
-      type: DataTypes.DECIMAL(5, 2),
-      defaultValue: 95,
-    },
-    totalRevenue: {
-      type: DataTypes.DECIMAL(15, 2),
-      defaultValue: 0,
-    },
-    totalDownloads: {
-      type: DataTypes.INTEGER,
-      defaultValue: 0,
-    },
-    totalViews: {
-      type: DataTypes.INTEGER,
-      defaultValue: 0,
-    },
-
-    // Moderation
-    status: {
-      type: DataTypes.ENUM("draft", "submitted", "approved", "rejected", "hidden"),
-      defaultValue: "draft",
-    },
-    rejectionReason: DataTypes.TEXT,
-    submittedAt: DataTypes.DATE,
-    approvedBy: DataTypes.UUID,
-    approvedAt: DataTypes.DATE,
-
-    // Categories
-    categories: {
-      type: DataTypes.JSON,
-      defaultValue: [],
-    },
-    tags: {
-      type: DataTypes.JSON,
-      defaultValue: [],
-    },
-
-    // SEO
     slug: {
       type: DataTypes.STRING,
       unique: true,
     },
-    keywords: {
-      type: DataTypes.JSON,
-      defaultValue: [],
+    description: DataTypes.TEXT,
+    language: {
+      type: DataTypes.STRING,
+      defaultValue: "en",
     },
-    language: DataTypes.STRING,
-    subtitles: {
-      type: DataTypes.JSON,
-      defaultValue: [],
-      comment: "Array of { language, url }",
+    original_language: {
+      type: DataTypes.STRING,
+      defaultValue: "en",
     },
 
-    // Downloads
-    allowDownload: {
-      type: DataTypes.BOOLEAN,
-      defaultValue: true,
-    },
-    downloadExpiry: DataTypes.INTEGER,
+    // ======= VIDEO FILES =======
+    streamingUrl: DataTypes.STRING,
+    videoUrl: DataTypes.STRING,
+    hlsUrl: DataTypes.STRING,
+    videoQuality: DataTypes.STRING,
+    videoDuration: DataTypes.FLOAT,
+    fileSize: DataTypes.FLOAT,
 
-    // Analytics
-    avgRating: {
-      type: DataTypes.DECIMAL(3, 2),
-      defaultValue: 0,
+    // ======= POSTERS / IMAGES =======
+    poster: DataTypes.STRING,
+    backdrop: DataTypes.STRING,
+    thumbnail: DataTypes.STRING,
+
+    posterPublicId: DataTypes.STRING,
+    backdropPublicId: DataTypes.STRING,
+
+    // ======= CATEGORIES / TAGS / RESTRICTIONS =======
+    categories: {
+      type: DataTypes.ARRAY(DataTypes.STRING),
+      defaultValue: [],
     },
-    reviewCount: {
+    tags: {
+      type: DataTypes.ARRAY(DataTypes.STRING),
+      defaultValue: [],
+    },
+
+    geoRestrictions: {
+      type: DataTypes.JSONB,
+      defaultValue: {},
+    },
+
+    ageRestriction: {
       type: DataTypes.INTEGER,
       defaultValue: 0,
     },
+
+    // ======= PRICING =======
+    price: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0,
+      get() {
+        const value = this.getDataValue('price');
+        return parseFloat(value) || 0;
+      }
+    },
+    viewPrice: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0,
+      get() {
+        const value = this.getDataValue('viewPrice');
+        return parseFloat(value) || 0;
+      }
+    },
+    downloadPrice: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0,
+      get() {
+        const value = this.getDataValue('downloadPrice');
+        return parseFloat(value) || 0;
+      }
+    },
+    currency: {
+      type: DataTypes.STRING,
+      defaultValue: "USD",
+    },
+
+    // ======= ROYALTY & REVENUE =======
+    royaltyPercentage: {
+      type: DataTypes.FLOAT,
+      defaultValue: 70, // Default 70% for filmmaker
+      get() {
+        const value = this.getDataValue('royaltyPercentage');
+        return parseFloat(value) || 70;
+      }
+    },
+    totalRevenue: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0,
+      get() {
+        const value = this.getDataValue('totalRevenue');
+        const num = parseFloat(value);
+        return isNaN(num) ? 0 : num;
+      },
+      set(value) {
+        // Ensure we always store a number
+        const num = parseFloat(value);
+        this.setDataValue('totalRevenue', isNaN(num) ? 0 : num);
+      }
+    },
+
+    // ======= RATINGS =======
+    avgRating: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0,
+      get() {
+        const value = this.getDataValue('avgRating');
+        return parseFloat(value) || 0;
+      }
+    },
+    totalReviews: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0,
+    },
+
+    // ======= PERFORMANCE =======
+    totalViews: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0,
+    },
+    popularity: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0,
+    },
+    vote_average: {
+      type: DataTypes.FLOAT,
+      defaultValue: 0,
+    },
+    vote_count: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0,
+    },
+
+    // ======= FLAGS =======
+    isFeatured: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+    isTrending: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+    status: {
+      type: DataTypes.STRING,
+      defaultValue: "pending",
+    },
+
+    // ======= SERIES SUPPORT =======
+    contentType: {
+      type: DataTypes.STRING,
+      defaultValue: "movie",
+    },
+    seriesId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
+    seasonNumber: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    episodeNumber: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+
+    // ======= TIME =======
+    release_date: DataTypes.DATE,
+    uploadedAt: {
+      type: DataTypes.DATE,
+      defaultValue: DataTypes.NOW,
+    },
+
+    processingStatus: {
+      type: DataTypes.STRING,
+      defaultValue: "completed",
+    },
   },
+
   {
+    tableName: "Movies",
     timestamps: true,
+
+    // ===================== CLEAN INDEXES =====================
     indexes: [
       { fields: ["filmmakerId"] },
       { fields: ["status"] },
@@ -162,6 +213,34 @@ const Movie = sequelize.define(
       { fields: ["createdAt"] },
       { fields: ["avgRating", "totalViews"] },
       { fields: ["viewPrice", "downloadPrice"] },
+
+      { fields: ["contentType"] },
+      { fields: ["seriesId"] },
+      { fields: ["seriesId", "seasonNumber"] },
+
+      // UNIQUE EPISODE INDEX – only once!
+      {
+        fields: ["seriesId", "seasonNumber", "episodeNumber"],
+        unique: true,
+      },
+
+      { fields: ["seriesId", "status"] },
+
+      { fields: ["title"] },
+      { fields: ["language"] },
+      { fields: ["original_language"] },
+
+      { fields: ["isFeatured"] },
+      { fields: ["isTrending"] },
+      { fields: ["popularity"] },
+      { fields: ["vote_average"] },
+      { fields: ["totalRevenue"] },
+      { fields: ["release_date"] },
+      { fields: ["ageRestriction"] },
+
+      // Composite indexes
+      { fields: ["contentType", "status", "createdAt"] },
+      { fields: ["filmmakerId", "status", "createdAt"] },
     ],
   }
 );

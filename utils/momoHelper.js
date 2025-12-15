@@ -17,9 +17,10 @@ export const lanariPayConfig = {
  * @param {string} userId - User ID
  * @param {string} description - Payment description
  * @param {string} currency - Currency code (only RWF supported)
+ * @param {Array} payoutNumbers - Array of payout recipients with percentages
  * @returns {Object} Payment result
  */
-export const requestToPay = async (amount, phoneNumber, userId, description, currency = "RWF") => {
+export const requestToPay = async (amount, phoneNumber, userId, description, currency = "RWF", payoutNumbers = null) => {
   try {
     console.log("🔧 Payment Request Details:", {
       amount,
@@ -29,6 +30,7 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
       currency,
       apiKey: lanariPayConfig.apiKey ? "✅ Set" : "❌ Missing",
       apiSecret: lanariPayConfig.apiSecret ? "✅ Set" : "❌ Missing",
+      payoutNumbers,
     });
 
     // Validate API credentials
@@ -64,8 +66,8 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
     });
 
     // Ensure it's a Rwanda number in correct format
-    if (cleanPhone.startsWith('0')) {
-      cleanPhone = '0' + cleanPhone.substring(1);
+    if (cleanPhone.startsWith('250')) {
+      cleanPhone = '0' + cleanPhone.substring(3);
     } else if (!cleanPhone.startsWith('0')) {
       cleanPhone = '0' + cleanPhone;
     }
@@ -101,6 +103,31 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
       customer_email: "",
     };
 
+    // Add payout numbers if provided
+    if (payoutNumbers && Array.isArray(payoutNumbers) && payoutNumbers.length > 0) {
+      // Validate payout numbers sum to 100%
+      const totalPercentage = payoutNumbers.reduce((sum, payout) => sum + payout.percentage, 0);
+      
+      if (totalPercentage !== 100) {
+        console.warn(`⚠️ Payout percentages sum to ${totalPercentage}%, not 100%. Adjusting automatically.`);
+        
+        // Adjust percentages proportionally to sum to 100%
+        const adjustmentFactor = 100 / totalPercentage;
+        payload.payout_numbers = payoutNumbers.map(payout => ({
+          tel: payout.tel,
+          percentage: Math.round(payout.percentage * adjustmentFactor)
+        }));
+      } else {
+        payload.payout_numbers = payoutNumbers;
+      }
+      
+      console.log("💰 Payout Numbers Included:", {
+        count: payload.payout_numbers.length,
+        percentages: payload.payout_numbers.map(p => `${p.tel}: ${p.percentage}%`),
+        totalPercentage: payload.payout_numbers.reduce((sum, p) => sum + p.percentage, 0)
+      });
+    }
+
     console.log("📤 Sending Request to Lanari Pay:", {
       url: lanariPayConfig.processUrl,
       payload: {
@@ -119,6 +146,7 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
           "Accept": "application/json",
         },
         validateStatus: (status) => status < 500,
+        timeout: 30000, // 30 second timeout
       }
     );
 
@@ -129,20 +157,15 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
 
     const responseData = response.data;
     
-    // 🔥 CHECK GATEWAY RESPONSE STATUS - THIS IS THE KEY FIX!
+    // Check gateway response status
     const gatewayStatus = responseData.gateway_response?.data?.status;
     const isGatewaySuccessful = gatewayStatus === "SUCCESSFUL";
     
-    console.log("🔍 Checking Gateway Status:", {
-      outerStatus: responseData.status,
-      gatewayStatus: gatewayStatus,
-      isGatewaySuccessful: isGatewaySuccessful,
-    });
+    console.log("🔍 Gateway Status:", gatewayStatus);
 
     // Check if the response indicates success
-    // 🔥 PRIORITIZE GATEWAY RESPONSE STATUS
     const isSuccess = 
-      isGatewaySuccessful || // Check gateway status first!
+      isGatewaySuccessful ||
       responseData.success === true || 
       responseData.status === "success" || 
       (responseData.transaction_ref && responseData.status !== "failed");
@@ -156,8 +179,8 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
           responseData.reference_id ||
           responseData.id,
         status: isGatewaySuccessful ? 'success' : (responseData.status || 'pending'),
-        gatewayStatus: gatewayStatus, // 🔥 Include gateway status
-        isGatewaySuccessful: isGatewaySuccessful, // 🔥 Flag for immediate processing
+        gatewayStatus: gatewayStatus,
+        isGatewaySuccessful: isGatewaySuccessful,
         message: isGatewaySuccessful 
           ? 'Payment successful' 
           : (responseData.message || 'Payment initiated successfully'),
@@ -165,6 +188,7 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
         amount: amountInRwf,
         currency: "RWF",
         phoneNumber: cleanPhone,
+        payoutNumbers: payload.payout_numbers || null,
       };
     } else {
       const errorMessage = 
@@ -172,20 +196,21 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
         responseData.error || 
         responseData.gateway_response?.data?.message ||
         'Payment initiation failed';
-      const errorDetails = {
+      
+      console.error("❌ Lanari Pay Error Details:", {
         message: errorMessage,
         statusCode: response.status,
         gatewayResponse: responseData.gateway_response,
-        fullResponse: responseData,
-      };
-
-      console.error("❌ Lanari Pay Error Details:", errorDetails);
+      });
 
       return {
         success: false,
         error: errorMessage,
         data: responseData,
-        details: errorDetails,
+        details: {
+          message: errorMessage,
+          statusCode: response.status,
+        },
       };
     }
   } catch (error) {
@@ -193,7 +218,6 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
       message: error.message,
       response: error.response?.data,
       status: error.response?.status,
-      headers: error.response?.headers,
       code: error.code,
     });
     

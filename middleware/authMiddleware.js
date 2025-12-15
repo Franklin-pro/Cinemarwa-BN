@@ -226,7 +226,8 @@ export const requireFilmmakerVerified = async (req, res, next) => {
       });
     }
 
-    if (!user.filmmaker?.isVerified) {
+    if (!user.filmmmakerMomoPhoneNumber || !user.approvalStatus === "approved") {
+      console.log("Bank details verified:", user.filmmmakerMomoPhoneNumber);
       return res.status(403).json({
         message: "Your filmmaker account must be verified",
         completionRequired: {
@@ -282,4 +283,38 @@ export const requireRole = (...allowedRoles) => {
     }
     next();
   };
+};
+
+/**
+ * Optional authentication: if a valid token is present, attach `req.user`.
+ * If no token or token is invalid, do NOT return 401 — just continue without user.
+ */
+export const optionalAuthenticate = async (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+
+  if (!token) return next();
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findByPk(decoded.userId);
+    if (!user) return next();
+
+    // Ensure token matches an active device for this user
+    const deviceExists = Array.isArray(user.activeDevices) && user.activeDevices.some(
+      (device) => device.token === token
+    );
+    if (!deviceExists) return next();
+
+    req.userId = user.id;
+    req.userRole = user.role;
+    req.deviceId = decoded.deviceId;
+    req.user = user;
+
+    next();
+  } catch (error) {
+    console.error("Optional authentication error:", error.message);
+    // Do not block the request — optional auth only
+    next();
+  }
 };
