@@ -429,7 +429,6 @@ export const loginWithGoogle = async (req, res) => {
         }
 
         user.changed("activeDevices", true);
-        console.log(user);
         await user.save();
 
         // Redirect back to frontend with JWT

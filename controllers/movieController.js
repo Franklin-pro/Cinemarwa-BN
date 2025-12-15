@@ -1,5 +1,6 @@
 import Movie from "../models/Movie.model.js";
 import UserAccess from "../models/userAccess.model.js"
+import User from "../models/User.modal.js";
 import slugify from "slugify";
 import { uploadToB2, deleteFromB2 } from "../utils/backblazeB2.js";
 import { Op } from "sequelize";
@@ -215,13 +216,30 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Parse categories
+    // Parse categories robustly. Accept comma-separated string, array, or JSON stringified array
     let parsedCategories = [];
     if (categories) {
       if (typeof categories === "string") {
-        parsedCategories = categories.split(",").map((cat) => cat.trim()).filter(Boolean);
+        const trimmed = categories.trim();
+        // If looks like a JSON array, try to parse it
+        if (trimmed.startsWith("[")) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed)) {
+              parsedCategories = parsed.map((cat) => String(cat).trim()).filter(Boolean);
+            } else {
+              // fallback to comma split
+              parsedCategories = trimmed.split(",").map((cat) => cat.replace(/^[\[\]"]+|[\[\]"]+$/g, "").trim()).filter(Boolean);
+            }
+          } catch (err) {
+            // if JSON.parse fails, fallback to comma-separated parsing
+            parsedCategories = trimmed.split(",").map((cat) => cat.replace(/^[\[\]"]+|[\[\]"]+$/g, "").trim()).filter(Boolean);
+          }
+        } else {
+          parsedCategories = trimmed.split(",").map((cat) => cat.trim()).filter(Boolean);
+        }
       } else if (Array.isArray(categories)) {
-        parsedCategories = categories.map((cat) => cat.trim()).filter(Boolean);
+        parsedCategories = categories.map((cat) => String(cat).replace(/^[\[\]"]+|[\[\]"]+$/g, "").trim()).filter(Boolean);
       }
     }
 
@@ -872,24 +890,30 @@ export const getMovieById = async (req, res) => {
     let accessDetails = null;
 
     if (userId) {
-      // Check individual access
-      const individualAccess = await UserAccess.findOne({
+      
+      // Check individual access - simplified query
+      let individualAccess = await UserAccess.findOne({
         where: {
-          userId,
+          userId: userId,
           movieId: movie.id,
-          status: "active",
-          [Op.or]: [
-            { expiresAt: null },
-            { expiresAt: { [Op.gt]: new Date() } }
-          ]
+          status: "active"
         },
       });
 
+      // If found, check if it's still valid (or has no expiry)
       if (individualAccess) {
-        userHasAccess = true;
-        accessType = "individual";
-        expiresAt = individualAccess.expiresAt;
-        accessDetails = individualAccess;
+        const hasExpiry = individualAccess.expiresAt !== null && individualAccess.expiresAt !== undefined;
+        const isExpired = hasExpiry && new Date(individualAccess.expiresAt) <= new Date();
+        
+        if (!isExpired) {
+          userHasAccess = true;
+          accessType = "individual";
+          expiresAt = individualAccess.expiresAt;
+          accessDetails = individualAccess;
+          // console.log(`   ✅ Access GRANTED`);
+        } else {
+          console.log(`   ❌ Access expired`);
+        }
       }
 
       // Check series access if this is an episode
@@ -898,16 +922,21 @@ export const getMovieById = async (req, res) => {
           where: {
             userId,
             seriesId: movie.seriesId,
-            status: "active",
-            expiresAt: { [Op.gt]: new Date() }
-          },
+            status: "active"
+          }
         });
 
         if (seriesAccess) {
-          userHasAccess = true;
-          accessType = "series";
-          expiresAt = seriesAccess.expiresAt;
-          accessDetails = seriesAccess;
+          const hasExpiry = seriesAccess.expiresAt !== null && seriesAccess.expiresAt !== undefined;
+          const isExpired = hasExpiry && new Date(seriesAccess.expiresAt) <= new Date();
+          
+          if (!isExpired) {
+            userHasAccess = true;
+            accessType = "series";
+            expiresAt = seriesAccess.expiresAt;
+            accessDetails = seriesAccess;
+            // console.log(`   ✅ Series access GRANTED`);
+          }
         }
       }
 
@@ -915,6 +944,25 @@ export const getMovieById = async (req, res) => {
       if (!userHasAccess && movie.filmmakerId === userId) {
         userHasAccess = true;
         accessType = "owner";
+      }
+
+      // Check if user has active subscription
+      if (!userHasAccess) {
+        const user = await User.findByPk(userId);
+        if (user && user.isUpgraded && user.subscription) {
+          const subscriptionEndDate = new Date(user.subscription.endDate || user.subscription.expiresAt);
+          if (subscriptionEndDate > new Date()) {
+            userHasAccess = true;
+            accessType = "subscription";
+            expiresAt = subscriptionEndDate;
+            accessDetails = {
+              id: user.id,
+              plan: user.subscription.planId || user.subscription.planName,
+              status: "active",
+              expiresAt: subscriptionEndDate
+            };
+          }
+        }
       }
     }
 
@@ -999,8 +1047,7 @@ export const getMovieById = async (req, res) => {
       additionalData.nextEpisode = nextEpisode;
       additionalData.previousEpisode = previousEpisode;
     }
-
-    // Transform response
+    
     const responseData = {
       ...movie.toJSON(),
       userAccess: {
@@ -1076,7 +1123,23 @@ export const updateMovie = async (req, res) => {
     if (downloadPrice !== undefined) updateData.downloadPrice = parseFloat(downloadPrice);
     if (currency) updateData.currency = currency;
     if (royaltyPercentage !== undefined) updateData.royaltyPercentage = parseInt(royaltyPercentage);
-    if (categories) updateData.categories = Array.isArray(categories) ? categories : categories.split(',').map(cat => cat.trim());
+    if (categories) {
+      if (Array.isArray(categories)) {
+        updateData.categories = categories.map((cat) => String(cat).replace(/^[\[\]"]+|[\[\]"]+$/g, "").trim()).filter(Boolean);
+      } else if (typeof categories === 'string') {
+        const trimmed = categories.trim();
+        if (trimmed.startsWith('[')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            updateData.categories = Array.isArray(parsed) ? parsed.map((c) => String(c).trim()).filter(Boolean) : trimmed.split(',').map(c => c.replace(/^[\[\]"]+|[\[\]"]+$/g, "").trim()).filter(Boolean);
+          } catch (err) {
+            updateData.categories = trimmed.split(',').map(c => c.replace(/^[\[\]"]+|[\[\]"]+$/g, "").trim()).filter(Boolean);
+          }
+        } else {
+          updateData.categories = trimmed.split(',').map(c => c.trim()).filter(Boolean);
+        }
+      }
+    }
     if (status) updateData.status = status;
     if (contentType) updateData.contentType = contentType;
     if (seriesId) updateData.seriesId = seriesId;
@@ -1189,6 +1252,9 @@ export const deleteMovie = async (req, res) => {
       await deleteFromB2(movie.backdropPublicId);
     }
     // Note: Video file deletion might need additional handling
+    if (movie.videoPublicId) {
+      await deleteFromB2(movie.videoPublicId);
+    }
 
     // Update series episode count if this is an episode
     const seriesId = movie.seriesId;

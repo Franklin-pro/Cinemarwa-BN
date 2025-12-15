@@ -19,7 +19,7 @@ import {
   getFilmmakerSeries,
   addRatingMovies,
 } from "../controllers/movieController.js";
-import { authenticateToken, requireAdmin } from "../middleware/authMiddleware.js";
+import { authenticateToken, requireAdmin, optionalAuthenticate } from "../middleware/authMiddleware.js";
 import {
   uploadVideoMiddleware,
   uploadImageMiddleware,
@@ -53,7 +53,8 @@ router.get("/categories", getMovieCategories);
 router.get("/filmmaker/:filmamakerId", getFilmmakerMovies);
 router.get("/filmmaker/:filmmakerId/series", getFilmmakerSeries);
 // Get movie by ID or slug (must be last)
-router.get("/:id", getMovieById);
+// `optionalAuthenticate` will attach `req.user` when a valid token is sent.
+router.get("/:id", optionalAuthenticate, getMovieById);
 
 // ====== PROTECTED ROUTES ======
 

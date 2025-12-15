@@ -21,12 +21,16 @@ const blockUserSchema = Joi.object({
   duration: Joi.number().min(1), // Days, 0 = permanent
 });
 
+// ====== HELPER FUNCTION ======
+const parseNumber = (value) => {
+  if (value === null || value === undefined) return 0;
+  const num = typeof value === 'string' ? parseFloat(value) : Number(value);
+  return isNaN(num) ? 0 : num;
+};
+
 // ====== ADMIN DASHBOARD & ANALYTICS ======
 
-/**
- * Get admin dashboard overview
- * GET /admin/dashboard
- */
+// Replace your getAdminDashboard function with this FIXED version:
 export const getAdminDashboard = async (req, res) => {
   try {
     // Get total statistics
@@ -38,10 +42,41 @@ export const getAdminDashboard = async (req, res) => {
     const approvedMovies = await Movie.count({ where: { status: "approved" } });
     const pendingMovies = await Movie.count({ where: { status: "submitted" } });
 
-    // Get payment statistics
-    const payments = await Payment.findAll({ where: { paymentStatus: "succeeded" } });
-    const totalRevenue = payments.reduce((sum, p) => sum + Number(p.amount), 0);
+    // Get payment statistics - FIXED HERE
+    const payments = await Payment.findAll({ 
+      where: { paymentStatus: "succeeded" } 
+    });
+
+    payments.forEach((p, i) => {
+
+    });
+    
+    // FIXED CALCULATION: Force convert EVERY amount to number
+    let totalRevenue = 0;
+    
+    payments.forEach(payment => {
+      let amountValue = payment.amount;
+      
+      // Force conversion to number
+      if (amountValue === null || amountValue === undefined) {
+        amountValue = 0;
+      } else if (typeof amountValue === 'string') {
+        // Remove any non-numeric characters except decimal point
+        const cleaned = amountValue.replace(/[^0-9.]/g, '');
+        amountValue = parseFloat(cleaned) || 0;
+      } else if (typeof amountValue === 'number') {
+        // Already a number, keep it
+      } else {
+        // For any other type (object, boolean, etc.), try to convert
+        amountValue = Number(amountValue) || 0;
+      }
+      totalRevenue += amountValue;
+    });
+
+    
     const totalTransactions = payments.length;
+    const avgTransaction = totalTransactions > 0 ? totalRevenue / totalTransactions : 0;
+    const platformEarnings = totalRevenue * 0.3;
 
     // Get pending filmmaker approvals
     const pendingFilmmakers = await User.count({
@@ -72,11 +107,14 @@ export const getAdminDashboard = async (req, res) => {
       finance: {
         totalRevenue: totalRevenue.toFixed(2),
         totalTransactions,
-        averageTransaction:
-          totalTransactions > 0
-            ? (totalRevenue / totalTransactions).toFixed(2)
-            : 0,
-        platformEarnings: (totalRevenue * 0.1).toFixed(2), // 10% platform fee
+        averageTransaction: avgTransaction.toFixed(2),
+        platformEarnings: platformEarnings.toFixed(2), // 30% platform fee
+        // Add debug info to response
+        _debug: {
+          expected: "4 payments of 5 each = 20",
+          actual: totalRevenue,
+          paymentCount: payments.length
+        }
       },
       alerts: {
         pendingFilmmakers,
@@ -85,6 +123,7 @@ export const getAdminDashboard = async (req, res) => {
       },
     });
   } catch (error) {
+    console.error('Dashboard error:', error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -118,25 +157,30 @@ export const getDetailedAnalytics = async (req, res) => {
         startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     }
 
-  
     const newUsers = await User.count({
       where: {
         createdAt: { [Op.gte]: startDate },
       },
     });
+    
     const newMovies = await Movie.count({
       where: {
         createdAt: { [Op.gte]: startDate },
       },
     });
+    
     const periodPayments = await Payment.findAll({
       where: {
         paymentDate: { [Op.gte]: startDate },
         paymentStatus: "succeeded",
       },
     });
-   const periodRevenue = periodPayments.reduce((sum, p) => sum + Number(p.amount), 0);
-
+    
+    // CORRECT CALCULATION: Parse each amount to number
+    let periodRevenue = 0;
+    periodPayments.forEach(payment => {
+      periodRevenue += parseNumber(payment.amount);
+    });
 
     // Get top movies
     const topMovies = await Movie.findAll({
@@ -172,7 +216,7 @@ export const getDetailedAnalytics = async (req, res) => {
         newMovies,
         transactions: periodPayments.length,
         revenue: periodRevenue.toFixed(2),
-        platformEarnings: (periodRevenue * 0.1).toFixed(2),
+        platformEarnings: (periodRevenue * 0.3).toFixed(2),
       },
       top: {
         movies: topMovies,
@@ -268,8 +312,6 @@ export const approveFilmmaker = async (req, res) => {
     if (value.status === "rejected") {
       updateData.rejectionReason = value.reason;
     }
-
-    // const filmmaker = await User.findByPk(filmamakerId);
 
     if (filmmaker) {
       Object.assign(filmmaker, updateData);
@@ -431,8 +473,6 @@ export const blockUser = async (req, res) => {
       ? new Date(Date.now() + value.duration * 24 * 60 * 60 * 1000)
       : null;
 
-    // const user = await User.findByPk(userId);
-
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -537,30 +577,29 @@ export const getPendingMovies = async (req, res) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
     const skip = (pageNum - 1) * limitNum;
 
-const movies = await Movie.findAll({
-  where: { status: "submitted" },
-  include: [
-    {
-      association: 'filmmaker',
-      attributes: ['id', 'name', 'email']
-    }
-  ],
-  order: [['createdAt', 'DESC']],
-  offset: skip,
-  limit: limitNum,
-  attributes: [
-    'id',
-    'title',
-    'description',
-    'avgRating',
-    'totalReviews',
-    'status',
-    'uploadedAt',
-    'release_date',
-    'videoDuration'
-  ]
-});
-
+    const movies = await Movie.findAll({
+      where: { status: "submitted" },
+      include: [
+        {
+          association: 'filmmaker',
+          attributes: ['id', 'name', 'email']
+        }
+      ],
+      order: [['createdAt', 'DESC']],
+      offset: skip,
+      limit: limitNum,
+      attributes: [
+        'id',
+        'title',
+        'description',
+        'avgRating',
+        'totalReviews',
+        'status',
+        'uploadedAt',
+        'release_date',
+        'videoDuration'
+      ]
+    });
 
     const total = await Movie.count({ where: { status: "submitted" } });
 
@@ -710,57 +749,61 @@ export const getPaymentReconciliation = async (req, res) => {
         startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
     }
 
-
     // Fetch payments in range with movie + filmmaker
-   const payments = await Payment.findAll({
-  where: {
-    paymentDate: { [Op.gte]: startDate },
-    paymentStatus: "succeeded",
-  },
-  include: [
-    {
-      model: Movie,
-      as: "movie", // <<< IMPORTANT
-      attributes: ["id", "title", "filmmakerId"],
+    const payments = await Payment.findAll({
+      where: {
+        paymentDate: { [Op.gte]: startDate },
+        paymentStatus: "succeeded",
+      },
       include: [
         {
-          model: User,
-          as: "filmmaker",
-          attributes: ["id", "name", "email"],
+          model: Movie,
+          as: "movie",
+          attributes: ["id", "title", "filmmakerId"],
+          include: [
+            {
+              model: User,
+              as: "filmmaker",
+              attributes: ["id", "name", "email"],
+            },
+          ],
         },
       ],
-    },
-  ],
-});
-
+    });
 
     let totalPlatformEarnings = 0;
     const filmmakerPayouts = {};
 
     payments.forEach((payment) => {
-   const platformFee = Number(payment.amount) * 0.1;
+      // Convert amount to number first
+      const paymentAmount = parseNumber(payment.amount);
+      const platformFee = paymentAmount * 0.3;
       totalPlatformEarnings += platformFee;
 
-const filmmakerId = payment.Movie?.filmmakerId;
-if (filmmakerId) {
-  filmmakerPayouts[filmmakerId] =
-    (filmmakerPayouts[filmmakerId] || 0) + Number(payment.amount || 0) * 0.9;
-}
+      const filmmakerId = payment.movie?.filmmakerId;
+      if (filmmakerId) {
+        // Ensure we're working with numbers
+        const filmmakerShare = paymentAmount * 0.7;
+        filmmakerPayouts[filmmakerId] = 
+          (filmmakerPayouts[filmmakerId] || 0) + filmmakerShare;
+      }
+    });
 
+    // Calculate total revenue - CORRECTED
+    let totalRevenue = 0;
+    payments.forEach(payment => {
+      totalRevenue += parseNumber(payment.amount);
     });
 
     res.status(200).json({
       period,
       dateRange: { start: startDate, end: now },
-     totalRevenue: payments
-  .reduce((sum, p) => sum + Number(p.amount || 0), 0)
-  .toFixed(2),
-
+      totalRevenue: totalRevenue.toFixed(2),
       platformEarnings: totalPlatformEarnings.toFixed(2),
       filmmakerPayouts: Object.entries(filmmakerPayouts).map(
         ([filmmakerId, amount]) => ({
           filmmakerId,
-          payoutAmount: amount.toFixed(2),
+          payoutAmount: parseNumber(amount).toFixed(2),
         })
       ),
       transactionCount: payments.length,
@@ -769,7 +812,6 @@ if (filmmakerId) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
 
 export const recentAdminActivities = async (req, res) => {
   try {
@@ -793,5 +835,4 @@ export const recentAdminActivities = async (req, res) => {
   } catch (error) {
     res.status(500).json({ message: "Server error", error: error.message });
   }
-
 };

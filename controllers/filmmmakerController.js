@@ -33,9 +33,9 @@ const withdrawalSchema = Joi.object({
   notes: Joi.string().max(500),
 });
 
-// Helper function to safely parse numeric values
-const safeParseFloat = (value) => {
-  const num = parseFloat(value);
+// FIXED: Enhanced helper function to safely parse numeric values
+const safeParseNumber = (value) => {
+  const num = Number(value);
   return isNaN(num) ? 0 : num;
 };
 
@@ -139,12 +139,16 @@ export const updateFilmmmakerProfile = async (req, res) => {
 
 // ====== FILMMAKER ANALYTICS DASHBOARD ======
 
+// ====== FILMMAKER ANALYTICS DASHBOARD ======
+
 /**
- * Get filmmaker dashboard summary
+ * Get filmmaker dashboard summary - WITH 6% GATEWAY FEE DEDUCTION
  * GET /filmmaker/dashboard
  */
 export const getFilmmmakerDashboard = async (req, res) => {
   try {
+    const GATEWAY_FEE_PERCENT = 6; // 6% MTN gateway fee
+    
     const filmmaker = await User.findByPk(req.user.id || req.userId);
 
     if (!filmmaker || filmmaker.role !== "filmmaker") {
@@ -157,28 +161,50 @@ export const getFilmmmakerDashboard = async (req, res) => {
     // Get movie statistics
     const movies = await Movie.findAll({
       where: { filmmakerId: req.user.id || req.userId },
-      attributes: ["id", "title", "totalViews", "totalRevenue", "avgRating", "totalReviews", "viewPrice", "status", "createdAt"]
+      attributes: [
+        "id", "title", "totalViews", "totalRevenue", 
+        "avgRating", "totalReviews", "viewPrice", "status", 
+        "createdAt", "royaltyPercentage"
+      ]
     });
 
-    // Initialize with 0 values to handle empty results
-    const totalViews = movies.reduce((sum, m) => sum + safeParseFloat(m.totalViews), 0);
-    const totalRevenue = movies.reduce((sum, m) => sum + safeParseFloat(m.totalRevenue), 0);
+    // Calculate totals using safeParseNumber
+    const totalViews = movies.reduce((sum, movie) => {
+      return sum + safeParseNumber(movie.totalViews);
+    }, 0);
+
+    let totalRevenue = movies.reduce((sum, movie) => {
+      return sum + safeParseNumber(movie.totalRevenue);
+    }, 0);
+
     const totalMovies = movies.length;
 
-    // Calculate average rating
-    const avgRating = movies.length > 0 
-      ? movies.reduce((sum, m) => sum + safeParseFloat(m.avgRating), 0) / movies.length
-      : 0;
+    // Calculate average rating properly
+    const totalRatingSum = movies.reduce((sum, movie) => {
+      return sum + safeParseNumber(movie.avgRating);
+    }, 0);
+    const avgRating = totalMovies > 0 ? totalRatingSum / totalMovies : 0;
 
-    // Calculate filmmaker earnings (default: 70% filmmaker, 30% platform)
-    const royaltyPercentage = movies.reduce((sum, m) => {
-      const royalty = safeParseFloat(m.royaltyPercentage);
-      return royalty > 0 ? royalty : 70; // Default 70%
-    }, 0) / Math.max(movies.length, 1);
+    // APPLY 6% GATEWAY FEE DEDUCTION TO TOTAL REVENUE
+    const gatewayFee = (totalRevenue * GATEWAY_FEE_PERCENT) / 100;
+    const revenueAfterGatewayFee = totalRevenue - gatewayFee;
+
+    // Calculate filmmaker earnings from revenue after gateway fee
+    let filmmmakerEarnings = 0;
+    let totalRoyaltyPercentage = 0;
     
-    const platformFeePercentage = 100 - royaltyPercentage;
-    const platformFee = (totalRevenue * platformFeePercentage) / 100;
-    const filmmmakerEarnings = totalRevenue - platformFee;
+    if (totalMovies > 0) {
+      // Calculate total royalty percentage
+      totalRoyaltyPercentage = movies.reduce((sum, movie) => {
+        const royalty = safeParseNumber(movie.royaltyPercentage);
+        return sum + (royalty > 0 ? royalty : 70); // Default 70%
+      }, 0);
+      
+      const avgRoyaltyPercentage = totalRoyaltyPercentage / totalMovies;
+      const platformFeePercentage = 100 - avgRoyaltyPercentage;
+      const platformFee = (revenueAfterGatewayFee * platformFeePercentage) / 100;
+      filmmmakerEarnings = revenueAfterGatewayFee - platformFee;
+    }
 
     // Get payment history
     const payments = await Payment.findAll({
@@ -191,38 +217,103 @@ export const getFilmmmakerDashboard = async (req, res) => {
 
     const totalSales = payments.length;
 
-    // Get recent movies
-    const recentMovies = movies.slice(0, 5).map(m => ({
-      id: m.id,
-      title: m.title,
-      views: safeParseFloat(m.totalViews),
-      revenue: safeParseFloat(m.totalRevenue),
-      rating: safeParseFloat(m.avgRating),
-      status: m.status,
-      createdAt: m.createdAt
-    }));
+    // Get recent movies with proper numeric values
+    const recentMovies = movies.slice(0, 5).map(movie => {
+      const movieRevenue = safeParseNumber(movie.totalRevenue);
+      const movieGatewayFee = (movieRevenue * GATEWAY_FEE_PERCENT) / 100;
+      const movieRevenueAfterFee = movieRevenue - movieGatewayFee;
+      
+      return {
+        id: movie.id,
+        title: movie.title,
+        views: safeParseNumber(movie.totalViews),
+        revenue: parseFloat(movieRevenueAfterFee.toFixed(2)), // Revenue after 6% deduction
+        grossRevenue: parseFloat(movieRevenue.toFixed(2)), // Original revenue
+        rating: safeParseNumber(movie.avgRating),
+        status: movie.status,
+        createdAt: movie.createdAt
+      };
+    });
+
+    // Calculate performance metrics with 6% deduction
+    let bestPerforming = null;
+    let recentlyAdded = null;
+    
+    if (totalMovies > 0) {
+      // Find best performing by revenue (after gateway fee)
+      bestPerforming = movies.reduce((best, current) => {
+        const currentRevenue = safeParseNumber(current.totalRevenue);
+        const bestRevenue = best ? safeParseNumber(best.totalRevenue) : 0;
+        return currentRevenue > bestRevenue ? current : best;
+      }, null);
+      
+      // Find most recently added
+      const sortedByDate = [...movies].sort((a, b) => 
+        new Date(b.createdAt) - new Date(a.createdAt)
+      );
+      recentlyAdded = sortedByDate[0];
+    }
+
+    // Calculate best performing revenue after gateway fee
+    let bestPerformingData = null;
+    if (bestPerforming) {
+      const bestRevenue = safeParseNumber(bestPerforming.totalRevenue);
+      const bestGatewayFee = (bestRevenue * GATEWAY_FEE_PERCENT) / 100;
+      const bestRevenueAfterFee = bestRevenue - bestGatewayFee;
+      
+      bestPerformingData = {
+        id: bestPerforming.id,
+        title: bestPerforming.title,
+        revenue: parseFloat(bestRevenueAfterFee.toFixed(2)),
+        views: safeParseNumber(bestPerforming.totalViews)
+      };
+    }
+
+    // Calculate royalty percentage for response
+    const avgRoyaltyPercentage = totalMovies > 0 
+      ? totalRoyaltyPercentage / totalMovies 
+      : 70;
+    const platformFee = revenueAfterGatewayFee - filmmmakerEarnings;
+
+    // APPLY 6% TO FILMMAKER BALANCE FIELDS
+    const pendingBalance = safeParseNumber(filmmaker.filmmmakerFinancePendingBalance);
+    const pendingBalanceAfterFee = pendingBalance - (pendingBalance * GATEWAY_FEE_PERCENT / 100);
+    
+    const withdrawnBalance = safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance);
+    const withdrawnBalanceAfterFee = withdrawnBalance - (withdrawnBalance * GATEWAY_FEE_PERCENT / 100);
 
     res.status(200).json({
       success: true,
       data: {
+        user: {
+          id: filmmaker.id,
+          name: filmmaker.name,
+          email: filmmaker.email
+        },
         summary: {
           totalMovies,
           totalViews,
           totalSales,
-          totalRevenue: totalRevenue.toFixed(2),
-          filmmmakerEarnings: filmmmakerEarnings.toFixed(2),
-          platformFee: platformFee.toFixed(2),
-          royaltyPercentage: royaltyPercentage.toFixed(1),
-          avgRating: avgRating.toFixed(1),
+          grossRevenue: parseFloat(totalRevenue.toFixed(2)), // Before gateway fee
+          gatewayFee: parseFloat(gatewayFee.toFixed(2)),
+          totalRevenue: parseFloat(revenueAfterGatewayFee.toFixed(2)), // After 6% deduction
+          filmmmakerEarnings: parseFloat(filmmmakerEarnings.toFixed(2)),
+          platformFee: parseFloat(platformFee.toFixed(2)),
+          royaltyPercentage: parseFloat(avgRoyaltyPercentage.toFixed(1)),
+          avgRating: parseFloat(avgRating.toFixed(1)),
         },
         finance: {
-          pendingBalance: safeParseFloat(filmmaker.filmmmakerFinancePendingBalance),
-          withdrawnBalance: safeParseFloat(filmmaker.filmmmakerFinanceWithdrawnBalance),
-          totalEarned: safeParseFloat(filmmaker.filmmmakerFinanceTotalEarned),
-          minimumWithdrawalAmount: safeParseFloat(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100,
-          canWithdraw: safeParseFloat(filmmaker.filmmmakerFinancePendingBalance) >= 
-                     (safeParseFloat(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100),
+          grossPendingBalance: parseFloat(pendingBalance.toFixed(2)),
+          availableBalance: parseFloat(pendingBalanceAfterFee.toFixed(2)), // After 6% deduction
+          pendingBalance: parseFloat(pendingBalanceAfterFee.toFixed(2)), // After 6% deduction
+          grossWithdrawnBalance: parseFloat(withdrawnBalance.toFixed(2)),
+          withdrawnBalance: parseFloat(withdrawnBalanceAfterFee.toFixed(2)), // After 6% deduction
+          totalEarned: parseFloat(filmmmakerEarnings.toFixed(2)),
+          minimumWithdrawalAmount: safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100,
+          canWithdraw: pendingBalanceAfterFee >= 
+                       (safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100),
           payoutMethod: filmmaker.filmmmakerFinancePayoutMethod || "bank_transfer",
+          gatewayFeePercent: GATEWAY_FEE_PERCENT,
         },
         approval: {
           status: filmmaker.approvalStatus || "pending",
@@ -231,17 +322,220 @@ export const getFilmmmakerDashboard = async (req, res) => {
         },
         recentMovies,
         performance: {
-          bestPerforming: movies.length > 0 ? movies.reduce((best, current) => 
-            safeParseFloat(current.totalRevenue) > safeParseFloat(best.totalRevenue) ? current : best
-          ) : null,
-          recentlyAdded: movies.length > 0 ? movies.sort((a, b) => 
-            new Date(b.createdAt) - new Date(a.createdAt)
-          )[0] : null
+          bestPerforming: bestPerformingData,
+          recentlyAdded: recentlyAdded ? {
+            id: recentlyAdded.id,
+            title: recentlyAdded.title,
+            createdAt: recentlyAdded.createdAt
+          } : null
         }
       }
     });
   } catch (error) {
     console.error("Error in getFilmmmakerDashboard:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
+  }
+};
+
+// ====== FILMMAKER REVENUE & WITHDRAWAL MANAGEMENT ======
+
+/**
+ * Get filmmaker financial summary with 6% gateway fee deduction
+ * GET /filmmaker/finance
+ */
+export const getFinancialSummary = async (req, res) => {
+  try {
+    const GATEWAY_FEE_PERCENT = 6; // 6% MTN gateway fee
+    
+    const filmmaker = await User.findByPk(req.user.id || req.userId);
+
+    if (!filmmaker || filmmaker.role !== "filmmaker") {
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
+    }
+
+    const filmmakerId = req.user.id || req.userId;
+
+    // Get payments with proper numeric calculations
+    const payments = await Payment.findAll({
+      where: { 
+        filmmakerId, 
+        paymentStatus: 'succeeded' 
+      },
+      attributes: [
+        'amount',
+        'paymentMethod',
+      ]
+    });
+
+    // Calculate sums with 6% gateway fee deduction
+    let paymentsGrossTotal = 0;
+    let paymentsNetTotal = 0; // After 6% gateway fee
+    let totalGatewayFees = 0;
+    let paymentsFilmmakerTotal = 0;
+    
+    payments.forEach(payment => {
+      const amount = safeParseNumber(payment.amount);
+      paymentsGrossTotal += amount;
+      
+      // Deduct 6% gateway fee from each payment
+      const gatewayFee = (amount * GATEWAY_FEE_PERCENT) / 100;
+      const amountAfterGatewayFee = amount - gatewayFee;
+      paymentsNetTotal += amountAfterGatewayFee;
+      totalGatewayFees += gatewayFee;
+      
+      // Use filmmaker amount if available, otherwise use amount after gateway fee
+      const filmmakerAmount = safeParseNumber(payment.filmmakerAmount);
+      if (filmmakerAmount > 0) {
+        const filmmakerGatewayFee = (filmmakerAmount * GATEWAY_FEE_PERCENT) / 100;
+        paymentsFilmmakerTotal += (filmmakerAmount - filmmakerGatewayFee);
+      } else {
+        paymentsFilmmakerTotal += amountAfterGatewayFee;
+      }
+    });
+
+    // Calculate average royalty from payments
+    let royaltySum = 0;
+    let validRoyaltyCount = 0;
+    
+    payments.forEach(p => {
+      const royalty = safeParseNumber(p.royaltyPercentage);
+      if (royalty > 0) {
+        royaltySum += royalty;
+        validRoyaltyCount++;
+      }
+    });
+    
+    const avgRoyaltyFromPayments = validRoyaltyCount > 0 ? royaltySum / validRoyaltyCount : 0;
+
+    // Fallback to movie totals if payments are not available
+    const movies = await Movie.findAll({
+      where: { filmmakerId },
+      attributes: ["totalRevenue", "royaltyPercentage"]
+    });
+
+    let moviesGrossRevenue = 0;
+    let moviesRoyaltySum = 0;
+    let validMovieRoyaltyCount = 0;
+    
+    movies.forEach(m => {
+      moviesGrossRevenue += safeParseNumber(m.totalRevenue);
+      const royalty = safeParseNumber(m.royaltyPercentage);
+      if (royalty > 0) {
+        moviesRoyaltySum += royalty;
+        validMovieRoyaltyCount++;
+      }
+    });
+
+    // Apply 6% gateway fee to movie revenue
+    const moviesGatewayFee = (moviesGrossRevenue * GATEWAY_FEE_PERCENT) / 100;
+    const moviesNetRevenue = moviesGrossRevenue - moviesGatewayFee;
+
+    // Use payment total if available (already has gateway fee deducted), otherwise use movie total
+    const grossRevenue = paymentsGrossTotal > 0 ? paymentsGrossTotal : moviesGrossRevenue;
+    const totalRevenue = paymentsNetTotal > 0 ? paymentsNetTotal : moviesNetRevenue;
+    const calculatedGatewayFees = paymentsGrossTotal > 0 ? totalGatewayFees : moviesGatewayFee;
+
+    // Calculate average royalty - prefer from payments, fallback to movies
+    let avgRoyalty = avgRoyaltyFromPayments;
+    if (avgRoyalty === 0 && validMovieRoyaltyCount > 0) {
+      avgRoyalty = moviesRoyaltySum / validMovieRoyaltyCount;
+    } else if (avgRoyalty === 0) {
+      avgRoyalty = 70; // Default
+    }
+
+    // Filmmaker earnings calculation (already includes gateway fee deduction)
+    let filmmmakerEarnings = 0;
+    if (paymentsFilmmakerTotal > 0) {
+      filmmmakerEarnings = paymentsFilmmakerTotal;
+    } else if (totalRevenue > 0 && avgRoyalty > 0) {
+      // Calculate from royalty percentage on revenue after gateway fee
+      filmmmakerEarnings = (totalRevenue * avgRoyalty) / 100;
+    }
+
+    // APPLY 6% DEDUCTION TO FILMMAKER BALANCE FIELDS
+    const grossPendingBalance = safeParseNumber(filmmaker.filmmmakerFinancePendingBalance);
+    const pendingBalance = grossPendingBalance - (grossPendingBalance * GATEWAY_FEE_PERCENT / 100);
+    
+    const grossWithdrawnBalance = safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance);
+    const withdrawnBalance = grossWithdrawnBalance - (grossWithdrawnBalance * GATEWAY_FEE_PERCENT / 100);
+    
+    const grossTotalEarned = safeParseNumber(filmmaker.filmmmakerFinanceTotalEarned);
+    const totalEarned = grossTotalEarned > 0 
+      ? grossTotalEarned - (grossTotalEarned * GATEWAY_FEE_PERCENT / 100)
+      : filmmmakerEarnings;
+    
+    const minimumWithdrawalAmount = safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100;
+
+    // Calculate current balance after fee
+    const currentBalance = pendingBalance + withdrawnBalance;
+
+    // Calculate platform fee (on revenue after gateway fee)
+    const platformFee = totalRevenue > 0 ? totalRevenue - filmmmakerEarnings : 0;
+
+    // Format with fixed decimals
+    const formatNumber = (num) => parseFloat(safeParseNumber(num).toFixed(2));
+    const formatPercent = (num) => parseFloat(safeParseNumber(num).toFixed(1));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        balance: {
+          grossPendingBalance: formatNumber(grossPendingBalance),
+          pendingBalance: formatNumber(pendingBalance), // After 6% deduction
+          grossWithdrawnBalance: formatNumber(grossWithdrawnBalance),
+          withdrawnBalance: formatNumber(withdrawnBalance), // After 6% deduction
+          grossTotalEarned: formatNumber(grossTotalEarned),
+          totalEarned: formatNumber(totalEarned), // After 6% deduction
+          calculatedEarnings: formatNumber(filmmmakerEarnings),
+          currentBalance: formatNumber(currentBalance), // After 6% deduction
+          availableBalance: formatNumber(pendingBalance), // After 6% deduction
+          gatewayFeePercent: GATEWAY_FEE_PERCENT,
+        },
+        withdrawalSettings: {
+          minimumAmount: formatNumber(minimumWithdrawalAmount),
+          payoutMethod: filmmaker.filmmmakerFinancePayoutMethod || "bank_transfer",
+          lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate,
+          canWithdraw: pendingBalance >= minimumWithdrawalAmount,
+          nextPayoutDate: filmmaker.filmmmakerFinanceNextPayoutDate,
+        },
+        bankDetails: filmmaker.filmmmakerBankDetails || {},
+        revenueSummary: {
+          grossRevenue: formatNumber(grossRevenue),
+          totalMovieRevenue: formatNumber(totalRevenue), // After 6% deduction
+          averageRoyalty: `${formatPercent(avgRoyalty)}%`,
+          platformFee: `${formatPercent(100 - avgRoyalty)}%`,
+          platformFeeAmount: formatNumber(platformFee),
+          gatewayFee: `${GATEWAY_FEE_PERCENT}%`,
+          totalGatewayFees: formatNumber(calculatedGatewayFees),
+          estimatedMonthly: formatNumber(totalEarned / 30),
+        },
+        feeBreakdown: {
+          grossRevenue: formatNumber(grossRevenue),
+          gatewayFees: formatNumber(calculatedGatewayFees),
+          revenueAfterGatewayFee: formatNumber(totalRevenue),
+          platformFee: formatNumber(platformFee),
+          filmmakerEarnings: formatNumber(filmmmakerEarnings),
+        },
+        // Debug info to verify calculations
+        _debug: {
+          paymentsCount: payments.length,
+          paymentsGrossTotal: formatNumber(paymentsGrossTotal),
+          paymentsNetTotal: formatNumber(paymentsNetTotal),
+          gatewayFeePercent: GATEWAY_FEE_PERCENT,
+          totalGatewayFees: formatNumber(calculatedGatewayFees),
+          expectedCalculation: `Example: 4 payments of 5 each = 20 gross, ${GATEWAY_FEE_PERCENT}% fee = ${formatNumber(20 * GATEWAY_FEE_PERCENT / 100)}, net = ${formatNumber(20 - (20 * GATEWAY_FEE_PERCENT / 100))}`
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Error in getFinancialSummary:", error);
     res.status(500).json({ 
       success: false,
       message: "Server error", 
@@ -277,7 +571,7 @@ export const getMovieAnalytics = async (req, res) => {
       });
     }
 
-    // Get payment data for this movie
+    // Get payment data for this movie - FIXED CALCULATION
     const payments = await Payment.findAll({
       where: {
         movieId: movieId,
@@ -286,8 +580,13 @@ export const getMovieAnalytics = async (req, res) => {
       attributes: ["id", "amount", "paymentMethod", "userId", "createdAt"]
     });
 
-    const totalRevenue = payments.reduce((sum, p) => sum + safeParseFloat(p.amount), 0);
-    const royaltyPercentage = safeParseFloat(movie.royaltyPercentage) || 70;
+    // FIXED: Convert each amount to number before summing
+    let totalRevenue = 0;
+    payments.forEach(payment => {
+      totalRevenue += safeParseNumber(payment.amount);
+    });
+    
+    const royaltyPercentage = safeParseNumber(movie.royaltyPercentage) || 70;
     const platformFeePercentage = 100 - royaltyPercentage;
     const platformFee = (totalRevenue * platformFeePercentage) / 100;
     const filmmmakerShare = totalRevenue - platformFee;
@@ -308,6 +607,12 @@ export const getMovieAnalytics = async (req, res) => {
       new Date(p.createdAt) >= thirtyDaysAgo
     );
 
+    // Calculate recent revenue properly
+    let recentRevenue = 0;
+    recentPayments.forEach(payment => {
+      recentRevenue += safeParseNumber(payment.amount);
+    });
+
     res.status(200).json({
       success: true,
       data: {
@@ -316,31 +621,31 @@ export const getMovieAnalytics = async (req, res) => {
           title: movie.title,
           description: movie.description,
           status: movie.status,
-          totalViews: safeParseFloat(movie.totalViews),
-          totalRevenue: safeParseFloat(movie.totalRevenue),
-          avgRating: safeParseFloat(movie.avgRating),
-          reviewCount: safeParseFloat(movie.totalReviews),
+          totalViews: safeParseNumber(movie.totalViews),
+          totalRevenue: safeParseNumber(movie.totalRevenue),
+          avgRating: safeParseNumber(movie.avgRating),
+          reviewCount: safeParseNumber(movie.totalReviews),
           createdAt: movie.createdAt,
           price: {
-            viewPrice: safeParseFloat(movie.viewPrice),
-            downloadPrice: safeParseFloat(movie.downloadPrice),
+            viewPrice: safeParseNumber(movie.viewPrice),
+            downloadPrice: safeParseNumber(movie.downloadPrice),
             currency: movie.currency
           }
         },
         revenue: {
-          totalRevenue: totalRevenue.toFixed(2),
-          filmmmakerShare: filmmmakerShare.toFixed(2),
-          platformFee: platformFee.toFixed(2),
+          totalRevenue: safeParseNumber(totalRevenue).toFixed(2),
+          filmmmakerShare: safeParseNumber(filmmmakerShare).toFixed(2),
+          platformFee: safeParseNumber(platformFee).toFixed(2),
           royaltyPercentage,
           platformFeePercentage,
         },
         sales: {
           totalSales: payments.length,
           byPaymentMethod: paymentsByMethod,
-          averageSalePrice: payments.length > 0 ? (totalRevenue / payments.length).toFixed(2) : "0.00",
+          averageSalePrice: payments.length > 0 ? (safeParseNumber(totalRevenue) / payments.length).toFixed(2) : "0.00",
           recentSales: recentPayments.length,
           revenueTrend: recentPayments.length > 0 ? 
-            (recentPayments.reduce((sum, p) => sum + safeParseFloat(p.amount), 0) / 30).toFixed(2) : "0.00"
+            (safeParseNumber(recentRevenue) / 30).toFixed(2) : "0.00"
         },
         timeline: {
           createdAt: movie.createdAt,
@@ -362,69 +667,6 @@ export const getMovieAnalytics = async (req, res) => {
 
 // ====== FILMMAKER REVENUE & WITHDRAWAL MANAGEMENT ======
 
-/**
- * Get filmmaker financial summary
- * GET /filmmaker/finance
- */
-export const getFinancialSummary = async (req, res) => {
-  try {
-    const filmmaker = await User.findByPk(req.user.id || req.userId);
-
-    if (!filmmaker || filmmaker.role !== "filmmaker") {
-      return res.status(404).json({ 
-        success: false,
-        message: "Filmmaker not found" 
-      });
-    }
-
-    // Calculate total from movies
-    const movies = await Movie.findAll({
-      where: { filmmakerId: req.user.id || req.userId },
-      attributes: ["totalRevenue", "royaltyPercentage"]
-    });
-
-    const totalRevenue = movies.reduce((sum, m) => sum + safeParseFloat(m.totalRevenue), 0);
-    const avgRoyalty = movies.length > 0 ? 
-      movies.reduce((sum, m) => sum + (safeParseFloat(m.royaltyPercentage) || 70), 0) / movies.length : 70;
-    
-    const filmmmakerEarnings = (totalRevenue * avgRoyalty) / 100;
-
-    res.status(200).json({
-      success: true,
-      data: {
-        balance: {
-          pendingBalance: safeParseFloat(filmmaker.filmmmakerFinancePendingBalance),
-          withdrawnBalance: safeParseFloat(filmmaker.filmmmakerFinanceWithdrawnBalance),
-          totalEarned: safeParseFloat(filmmaker.filmmmakerFinanceTotalEarned),
-          calculatedEarnings: filmmmakerEarnings.toFixed(2),
-          currentBalance: safeParseFloat(filmmaker.filmmmakerFinancePendingBalance) + 
-                         safeParseFloat(filmmaker.filmmmakerFinanceWithdrawnBalance),
-        },
-        withdrawalSettings: {
-          minimumAmount: safeParseFloat(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100,
-          payoutMethod: filmmaker.filmmmakerFinancePayoutMethod || "bank_transfer",
-          lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate,
-          canWithdraw: safeParseFloat(filmmaker.filmmmakerFinancePendingBalance) >= 
-                     (safeParseFloat(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100),
-          nextPayoutDate: filmmaker.filmmmakerFinanceNextPayoutDate,
-        },
-        bankDetails: filmmaker.filmmmakerBankDetails || {},
-        revenueSummary: {
-          totalMovieRevenue: totalRevenue.toFixed(2),
-          averageRoyalty: avgRoyalty.toFixed(1) + "%",
-          platformFee: (100 - avgRoyalty).toFixed(1) + "%",
-          estimatedMonthly: (filmmakerEarnings / 30).toFixed(2)
-        }
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      success: false,
-      message: "Server error", 
-      error: error.message 
-    });
-  }
-};
 
 /**
  * Request withdrawal (creates withdrawal request)
@@ -460,7 +702,7 @@ export const requestWithdrawal = async (req, res) => {
     }
 
     // Check minimum balance
-    const minimumAmount = safeParseFloat(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100;
+    const minimumAmount = safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100;
     if (value.amount < minimumAmount) {
       return res.status(400).json({
         success: false,
@@ -471,7 +713,7 @@ export const requestWithdrawal = async (req, res) => {
     }
 
     // Check available balance
-    const pendingBalance = safeParseFloat(filmmaker.filmmmakerFinancePendingBalance);
+    const pendingBalance = safeParseNumber(filmmaker.filmmmakerFinancePendingBalance);
     if (value.amount > pendingBalance) {
       return res.status(400).json({
         success: false,
@@ -482,10 +724,10 @@ export const requestWithdrawal = async (req, res) => {
       });
     }
 
-    // Create withdrawal request (in production, this would be a separate model)
+    // Create withdrawal request
     const withdrawalRequest = {
       id: `WDR-${Date.now()}`,
-      amount: value.amount,
+      amount: safeParseNumber(value.amount),
       payoutMethod: value.payoutMethod || filmmaker.filmmmakerFinancePayoutMethod,
       status: "pending",
       submittedAt: new Date(),
@@ -494,7 +736,7 @@ export const requestWithdrawal = async (req, res) => {
     };
 
     // Update the user document
-    filmmaker.filmmmakerFinancePendingBalance = pendingBalance - value.amount;
+    filmmaker.filmmmakerFinancePendingBalance = pendingBalance - safeParseNumber(value.amount);
     filmmaker.filmmmakerFinanceLastWithdrawalDate = new Date();
     filmmaker.filmmmakerFinancePayoutMethod = value.payoutMethod || filmmaker.filmmmakerFinancePayoutMethod;
     
@@ -511,9 +753,9 @@ export const requestWithdrawal = async (req, res) => {
       data: {
         withdrawal: withdrawalRequest,
         newBalance: {
-          pendingBalance: filmmaker.filmmmakerFinancePendingBalance,
-          withdrawnBalance: safeParseFloat(filmmaker.filmmmakerFinanceWithdrawnBalance) + value.amount,
-          totalEarned: safeParseFloat(filmmaker.filmmmakerFinanceTotalEarned),
+          pendingBalance: safeParseNumber(filmmaker.filmmmakerFinancePendingBalance),
+          withdrawnBalance: safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance) + safeParseNumber(value.amount),
+          totalEarned: safeParseNumber(filmmaker.filmmmakerFinanceTotalEarned) || 0,
         },
       }
     });
@@ -542,20 +784,25 @@ export const getWithdrawalHistory = async (req, res) => {
     }
 
     const withdrawalHistory = filmmaker.filmmmakerFinanceWithdrawalHistory || [];
-    const totalWithdrawn = withdrawalHistory
-      .filter(w => w.status === "completed")
-      .reduce((sum, w) => sum + safeParseFloat(w.amount), 0);
+    
+    // FIXED: Convert amounts to numbers before summing
+    let totalWithdrawn = 0;
+    withdrawalHistory.forEach(w => {
+      if (w.status === "completed") {
+        totalWithdrawn += safeParseNumber(w.amount);
+      }
+    });
 
     res.status(200).json({
       success: true,
       data: {
-        withdrawnBalance: safeParseFloat(filmmaker.filmmmakerFinanceWithdrawnBalance),
+        withdrawnBalance: safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance),
         lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate,
         payoutMethod: filmmaker.filmmmakerFinancePayoutMethod,
-        totalWithdrawn: totalWithdrawn.toFixed(2),
+        totalWithdrawn: safeParseNumber(totalWithdrawn).toFixed(2),
         withdrawalHistory: withdrawalHistory.map(w => ({
           ...w,
-          amount: safeParseFloat(w.amount)
+          amount: safeParseNumber(w.amount)
         })),
         pendingWithdrawals: withdrawalHistory.filter(w => w.status === "pending").length,
         completedWithdrawals: withdrawalHistory.filter(w => w.status === "completed").length
@@ -572,7 +819,6 @@ export const getWithdrawalHistory = async (req, res) => {
 
 // ====== FILMMAKER MOVIE MANAGEMENT ======
 
-// controllers/filmmaker.controller.js
 /**
  * Get all filmmaker content (movies and series with episodes)
  * GET /filmmaker/movies
@@ -652,14 +898,14 @@ export const getFilmmmakerMovies = async (req, res) => {
         poster: item.poster,
         backdrop: item.backdrop,
         status: item.status,
-        totalViews: safeParseFloat(item.totalViews),
-        videoDuration: safeParseFloat(item.videoDuration),
-        totalRevenue: safeParseFloat(item.totalRevenue),
-        avgRating: safeParseFloat(item.avgRating),
-        totalReviews: safeParseFloat(item.totalReviews),
+        totalViews: safeParseNumber(item.totalViews),
+        videoDuration: safeParseNumber(item.videoDuration),
+        totalRevenue: safeParseNumber(item.totalRevenue),
+        avgRating: safeParseNumber(item.avgRating),
+        totalReviews: safeParseNumber(item.totalReviews),
         createdAt: item.createdAt,
-        viewPrice: safeParseFloat(item.viewPrice),
-        downloadPrice: safeParseFloat(item.downloadPrice),
+        viewPrice: safeParseNumber(item.viewPrice),
+        downloadPrice: safeParseNumber(item.downloadPrice),
         currency: item.currency,
         contentType: item.contentType,
       };
@@ -698,8 +944,6 @@ export const getFilmmmakerMovies = async (req, res) => {
   }
 };
 
-
-// In your filmmaker.controller.js
 export const getSeriesEpisodes = async (req, res) => {
   try {
     const { seriesId } = req.params;
@@ -712,8 +956,8 @@ export const getSeriesEpisodes = async (req, res) => {
         "createdAt", "viewPrice", "downloadPrice", "currency", "seasonNumber", "episodeNumber"
       ]
     });
+    
     if (!series || series.contentType !== "series") {
-   
       return res.status(404).json({
         success: false,
         message: "Series not found"
@@ -820,7 +1064,7 @@ export const editFilmmmakerMovie = async (req, res) => {
 
     // Update legacy price field for backward compatibility
     if (req.body.viewPrice !== undefined) {
-      updateData.price = req.body.viewPrice;
+      updateData.price = safeParseNumber(req.body.viewPrice);
     }
 
     const updatedMovie = await movie.update(updateData);
@@ -871,50 +1115,68 @@ export const getFilmmmakerStats = async (req, res) => {
       group: ['status', 'contentType']
     });
 
-    // Calculate totals
-    const totalMovies = movies.reduce((sum, m) => sum + parseInt(m.dataValues.count), 0);
-    const totalViews = movies.reduce((sum, m) => sum + safeParseFloat(m.dataValues.totalViews), 0);
-    const totalRevenue = movies.reduce((sum, m) => sum + safeParseFloat(m.dataValues.totalRevenue), 0);
-    const avgRating = movies.reduce((sum, m, index, array) => {
-      const rating = safeParseFloat(m.dataValues.avgRating);
-      return sum + (rating / array.length);
-    }, 0);
+    // Calculate totals - FIXED
+    const totalMovies = movies.reduce((sum, m) => sum + safeParseNumber(m.dataValues.count), 0);
+    
+    let totalViews = 0;
+    let totalRevenue = 0;
+    let totalRating = 0;
+    let validRatingsCount = 0;
+    
+    movies.forEach(m => {
+      totalViews += safeParseNumber(m.dataValues.totalViews);
+      totalRevenue += safeParseNumber(m.dataValues.totalRevenue);
+      
+      const rating = safeParseNumber(m.dataValues.avgRating);
+      if (!isNaN(rating)) {
+        totalRating += rating;
+        validRatingsCount++;
+      }
+    });
+    
+    const avgRating = validRatingsCount > 0 ? totalRating / validRatingsCount : 0;
 
-    // Get payment statistics
+    // Get payment statistics - FIXED
     const payments = await Payment.findAll({
       where: {
         filmmakerId: req.user.id || req.userId,
         paymentStatus: "succeeded"
-      },
-      attributes: [
-        [Movie.sequelize.fn('COUNT', Movie.sequelize.col('id')), 'count'],
-        [Movie.sequelize.fn('SUM', Movie.sequelize.col('amount')), 'totalAmount']
-      ]
+      }
     });
 
-    const totalSales = payments[0] ? parseInt(payments[0].dataValues.count) : 0;
+    let totalAmount = 0;
+    payments.forEach(payment => {
+      totalAmount += safeParseNumber(payment.amount);
+    });
+
+    const totalSales = payments.length;
 
     res.status(200).json({
       success: true,
       data: {
         totalMovies,
         totalViews,
-        totalRevenue: totalRevenue.toFixed(2),
+        totalRevenue: safeParseNumber(totalRevenue).toFixed(2),
         totalSales,
-        totalEarnings: safeParseFloat(filmmaker.filmmmakerFinanceTotalEarned),
-        averageRating: avgRating.toFixed(1),
+        filmmmakerEarnings: safeParseNumber(totalAmount).toFixed(2),
+        averageRating: safeParseNumber(avgRating).toFixed(1),
         byContentType: movies.reduce((acc, m) => {
           const type = m.contentType || "movie";
           if (!acc[type]) acc[type] = 0;
-          acc[type] += parseInt(m.dataValues.count);
+          acc[type] += safeParseNumber(m.dataValues.count);
           return acc;
         }, {}),
         byStatus: movies.reduce((acc, m) => {
           const status = m.status || "unknown";
           if (!acc[status]) acc[status] = 0;
-          acc[status] += parseInt(m.dataValues.count);
+          acc[status] += safeParseNumber(m.dataValues.count);
           return acc;
-        }, {})
+        }, {}),
+        // Debug info
+        _debug: {
+          paymentsCount: payments.length,
+          expectedCalculation: "4 payments of '5' each should equal 20"
+        }
       }
     });
   } catch (error) {
@@ -1062,9 +1324,9 @@ export const getPaymentMethod = async (req, res) => {
           allMethods: paymentDetails,
         },
         financialInfo: {
-          pendingBalance: safeParseFloat(filmmaker.filmmmakerFinancePendingBalance),
-          totalEarned: safeParseFloat(filmmaker.filmmmakerFinanceTotalEarned),
-          minimumWithdrawalAmount: safeParseFloat(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100,
+          pendingBalance: safeParseNumber(filmmaker.filmmmakerFinancePendingBalance),
+          totalEarned: safeParseNumber(filmmaker.filmmmakerFinanceTotalEarned) || 0,
+          minimumWithdrawalAmount: safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100,
           lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate || null,
         },
         verificationStatus: {
@@ -1087,4 +1349,4 @@ export const getPaymentMethod = async (req, res) => {
       error: error.message,
     });
   }
-};
+}

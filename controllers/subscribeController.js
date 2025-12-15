@@ -34,8 +34,12 @@ export const subscribeCinemaRwa = async (req, res) => {
 };
 
 // Notify all active subscribers
+// Notify all active subscribers
+// Accepts: multipart/form-data with fields `subject`, `message` and optional file field `image`.
+// The `image` will be attached inline to the email and displayed inside the message
 export const notifySubscribers = async (req, res) => {
     const { subject, message } = req.body;
+    const file = req.file; // optional single file upload
     
     // Validate input
     if (!subject || !message) {
@@ -53,9 +57,9 @@ export const notifySubscribers = async (req, res) => {
             return res.status(404).json({ message: 'No active subscribers found' });
         }
 
-        // Send emails to all active subscribers
+        // Send emails to all active subscribers. If a file is included, attach it.
         const emailPromises = subscribers.map(subscriber => 
-            notificationSubscribers(subscriber.email, subject, message)
+            notificationSubscribers(subscriber.email, subject, message, file)
         );
 
         const results = await Promise.allSettled(emailPromises);

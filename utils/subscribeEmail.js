@@ -1,56 +1,40 @@
-import nodemailer from 'nodemailer';
+import {
+  getWelcomeEmailTemplate,
+} from '../templates/WelcomeEmailTemplate.js';
+import {
+  getNotificationEmailTemplate,
+} from '../templates/notificationsEmailTemplate.js';
+import transporter from './mailer.js';
 
-// Configure email transporter
-const transporter = nodemailer.createTransport({
-    service: process.env.EMAIL_SERVICE || 'gmail',
-    host: process.env.EMAIL_HOST,
-    port: process.env.EMAIL_PORT || 587, 
-    secure: process.env.EMAIL_SECURE === 'true',
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASSWORD
-    }
-});
-
-// Subscribe email function
 export const subscribeEmail = async (email) => {
-    try {
-        const mailOptions = {
-            from: process.env.EMAIL_USER,
-            to: email,
-            subject: 'Subscription Confirmation',
-            text: 'Thank you for subscribing to our newsletter!'
-        };
-
-        await transporter.sendMail(mailOptions);
-        console.log(`Subscription email sent to ${email}`);
-        return true;
-    } catch (error) {
-        console.error(`Error sending subscription email to ${email}:`, error);
-        return false;
-    }
+  try {
+    await transporter.sendMail({
+      from: `"CinemaRwa" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: 'Welcome to Our Newsletter 🎉',
+      html: getWelcomeEmailTemplate(email)
+    });
+    return true;
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
 };
 
-// Notification function
-export const notificationSubscribers = async (email, subject, message) => {
-    try {
-        const mailOptions = {
-            from: process.env.EMAIL_USER,
-            to: email,
-            subject: subject,
-            text: message
-        };
-        await transporter.sendMail(mailOptions);
-        console.log(`Notification email sent to ${email}`);
-        return true;
-    } catch (error) {
-        console.error(`Error sending notification email to ${email}:`, error);
-        return false;
-    }
-};
-
-// Export both functions
-export default {
-    subscribeEmail,
-    notificationSubscribers
+export const notificationSubscribers = async (email, subject, message, file) => {
+  try {
+    await transporter.sendMail({
+      from: `"CinemaRwa" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject,
+      html: getNotificationEmailTemplate(subject, message, file ? 'screenshot@cinemarwa' : undefined),
+      attachments: file
+        ? [{ filename: file.originalname, content: file.buffer, cid: 'screenshot@cinemarwa' }]
+        : undefined
+    });
+    return true;
+  } catch (error) {
+    console.error(error);
+    return false;
+  }
 };

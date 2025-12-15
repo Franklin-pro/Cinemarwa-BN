@@ -74,14 +74,26 @@ const Movie = sequelize.define(
     price: {
       type: DataTypes.FLOAT,
       defaultValue: 0,
+      get() {
+        const value = this.getDataValue('price');
+        return parseFloat(value) || 0;
+      }
     },
     viewPrice: {
       type: DataTypes.FLOAT,
       defaultValue: 0,
+      get() {
+        const value = this.getDataValue('viewPrice');
+        return parseFloat(value) || 0;
+      }
     },
     downloadPrice: {
       type: DataTypes.FLOAT,
       defaultValue: 0,
+      get() {
+        const value = this.getDataValue('downloadPrice');
+        return parseFloat(value) || 0;
+      }
     },
     currency: {
       type: DataTypes.STRING,
@@ -91,17 +103,35 @@ const Movie = sequelize.define(
     // ======= ROYALTY & REVENUE =======
     royaltyPercentage: {
       type: DataTypes.FLOAT,
-      defaultValue: 0,
+      defaultValue: 70, // Default 70% for filmmaker
+      get() {
+        const value = this.getDataValue('royaltyPercentage');
+        return parseFloat(value) || 70;
+      }
     },
     totalRevenue: {
       type: DataTypes.FLOAT,
       defaultValue: 0,
+      get() {
+        const value = this.getDataValue('totalRevenue');
+        const num = parseFloat(value);
+        return isNaN(num) ? 0 : num;
+      },
+      set(value) {
+        // Ensure we always store a number
+        const num = parseFloat(value);
+        this.setDataValue('totalRevenue', isNaN(num) ? 0 : num);
+      }
     },
 
     // ======= RATINGS =======
     avgRating: {
       type: DataTypes.FLOAT,
       defaultValue: 0,
+      get() {
+        const value = this.getDataValue('avgRating');
+        return parseFloat(value) || 0;
+      }
     },
     totalReviews: {
       type: DataTypes.INTEGER,
