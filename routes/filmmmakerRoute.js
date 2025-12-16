@@ -13,6 +13,7 @@ import {
   updatePaymentMethod,
   getPaymentMethod,
   getSeriesEpisodes,
+  getFilmmmakerNotifications,
 } from "../controllers/filmmmakerController.js";
 import {
   authenticateToken,
@@ -21,6 +22,7 @@ import {
   requireFilmmakerVerified,
   checkNotBlocked,
 } from "../middleware/authMiddleware.js";
+import { getAllWithdrawals } from "../controllers/paymentController.js";
 
 const router = express.Router();
 
@@ -74,6 +76,12 @@ router.get(
   requireFilmmaker,
   getPaymentMethod
 );
+router.get(
+  "/notifications",
+  authenticateToken,
+  requireFilmmaker,
+  getFilmmmakerNotifications
+)
 
 // Update payment method
 // PUT /filmmaker/payment-method
@@ -115,7 +123,7 @@ router.get(
   "/withdrawals",
   authenticateToken,
   requireFilmmaker,
-  getWithdrawalHistory
+  getAllWithdrawals
 );
 
 // ====== MOVIE MANAGEMENT ======

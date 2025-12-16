@@ -1,5 +1,6 @@
 import express from "express";
 import dotenv from "dotenv";
+dotenv.config();
 import cors from "cors";
 import bodyParser from "body-parser";
 import session from "express-session";
@@ -17,7 +18,7 @@ import { initializePassport } from "./config/googleOAuth.js";
 import subscribeRoutes from "./routes/subscribeRoutes.js";
 import { User, Movie, Review, Payment, OTP } from "./models/index.js";
 
-dotenv.config();
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
