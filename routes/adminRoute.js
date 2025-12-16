@@ -14,6 +14,8 @@ import {
   approveMovie,
   getFlaggedContent,
   getPaymentReconciliation,
+  getFilmmakersPerformance,
+  recentAdminActivities,
 } from "../controllers/adminDashboardController.js";
 import {
   authenticateToken,
@@ -78,6 +80,8 @@ router.patch(
 // Get all users
 // GET /admin/users?role=filmmaker&search=john
 router.get("/users", authenticateToken, requireAdmin, getAllUsers);
+
+router.get("/recent-activities",authenticateToken,requireAdmin,recentAdminActivities)
 
 // Block user account
 // PATCH /admin/users/:userId/block
@@ -149,5 +153,7 @@ router.get(
   requireAdmin,
   getPaymentReconciliation
 );
+
+router.get('/filmmakers/performance', authenticateToken, requireAdmin, getFilmmakersPerformance);
 
 export default router;

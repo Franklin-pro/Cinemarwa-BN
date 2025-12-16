@@ -783,32 +783,128 @@ export const getWithdrawalHistory = async (req, res) => {
       });
     }
 
+    // Get withdrawal history from user document
     const withdrawalHistory = filmmaker.filmmmakerFinanceWithdrawalHistory || [];
     
-    // FIXED: Convert amounts to numbers before summing
+    console.log("Raw withdrawal history:", JSON.stringify(withdrawalHistory, null, 2)); // Debug log
+    
+    // Calculate totals
     let totalWithdrawn = 0;
+    let pendingWithdrawals = 0;
+    let completedWithdrawals = 0;
+    let failedWithdrawals = 0;
+    
+    // Process each withdrawal to calculate totals
     withdrawalHistory.forEach(w => {
+      const amount = safeParseNumber(w.amount);
+      
       if (w.status === "completed") {
-        totalWithdrawn += safeParseNumber(w.amount);
+        totalWithdrawn += amount;
+        completedWithdrawals++;
+      } else if (w.status === "pending") {
+        pendingWithdrawals++;
+      } else if (w.status === "failed" || w.status === "rejected") {
+        failedWithdrawals++;
       }
     });
+
+    // Sort withdrawals by date (most recent first)
+    const sortedHistory = withdrawalHistory.sort((a, b) => {
+      const dateA = new Date(a.submittedAt || a.createdAt || a.date || 0);
+      const dateB = new Date(b.submittedAt || b.createdAt || b.date || 0);
+      return dateB - dateA;
+    });
+
+    // Format the withdrawal history for response
+    const formattedHistory = sortedHistory.map((withdrawal, index) => ({
+      id: withdrawal.id || `WDR-${index + 1}`,
+      transactionId: withdrawal.transactionId || withdrawal.id || `WDR-${Date.now()}-${index}`,
+      amount: safeParseNumber(withdrawal.amount),
+      status: withdrawal.status || "pending",
+      payoutMethod: withdrawal.payoutMethod || filmmaker.filmmmakerFinancePayoutMethod || "bank_transfer",
+      submittedAt: withdrawal.submittedAt || withdrawal.createdAt || withdrawal.date,
+      estimatedTime: withdrawal.estimatedTime || "3-5 business days",
+      completedAt: withdrawal.completedAt,
+      notes: withdrawal.notes,
+      adminNotes: withdrawal.adminNotes,
+      referenceNumber: withdrawal.referenceNumber,
+      // Add method-specific details
+      methodDetails: withdrawal.payoutMethod === "momo" 
+        ? { phoneNumber: withdrawal.phoneNumber }
+        : withdrawal.payoutMethod === "bank_transfer"
+        ? { 
+            bankName: withdrawal.bankName,
+            accountNumber: withdrawal.accountNumber ? `••••${withdrawal.accountNumber.slice(-4)}` : null
+          }
+        : null
+    }));
+
+    // Get recent withdrawals (last 10)
+    const recentWithdrawals = formattedHistory.slice(0, 10);
+
+    // Calculate withdrawal stats
+    const totalWithdrawalsCount = withdrawalHistory.length;
+    const successRate = totalWithdrawalsCount > 0 
+      ? (completedWithdrawals / totalWithdrawalsCount) * 100 
+      : 0;
+
+    // Calculate average withdrawal amount
+    const completedWithdrawalsList = withdrawalHistory.filter(w => w.status === "completed");
+    const avgWithdrawalAmount = completedWithdrawalsList.length > 0
+      ? completedWithdrawalsList.reduce((sum, w) => sum + safeParseNumber(w.amount), 0) / completedWithdrawalsList.length
+      : 0;
+
+    // Get last withdrawal
+    const lastWithdrawal = withdrawalHistory.length > 0
+      ? formattedHistory[0]
+      : null;
 
     res.status(200).json({
       success: true,
       data: {
-        withdrawnBalance: safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance),
-        lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate,
-        payoutMethod: filmmaker.filmmmakerFinancePayoutMethod,
-        totalWithdrawn: safeParseNumber(totalWithdrawn).toFixed(2),
-        withdrawalHistory: withdrawalHistory.map(w => ({
-          ...w,
-          amount: safeParseNumber(w.amount)
-        })),
-        pendingWithdrawals: withdrawalHistory.filter(w => w.status === "pending").length,
-        completedWithdrawals: withdrawalHistory.filter(w => w.status === "completed").length
+        summary: {
+          totalWithdrawn: safeParseNumber(totalWithdrawn).toFixed(2),
+          totalWithdrawals: totalWithdrawalsCount,
+          pendingWithdrawals,
+          completedWithdrawals,
+          failedWithdrawals,
+          successRate: safeParseNumber(successRate).toFixed(1),
+          averageWithdrawal: safeParseNumber(avgWithdrawalAmount).toFixed(2),
+          lastWithdrawal: lastWithdrawal ? {
+            amount: lastWithdrawal.amount,
+            status: lastWithdrawal.status,
+            date: lastWithdrawal.submittedAt
+          } : null
+        },
+        currentBalance: {
+          pendingBalance: safeParseNumber(filmmaker.filmmmakerFinancePendingBalance),
+          withdrawnBalance: safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance),
+          totalEarned: safeParseNumber(filmmaker.filmmmakerFinanceTotalEarned || 0),
+          availableBalance: safeParseNumber(filmmaker.filmmmakerFinancePendingBalance), // Available for withdrawal
+          minimumWithdrawalAmount: safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100,
+          canWithdraw: safeParseNumber(filmmaker.filmmmakerFinancePendingBalance) >= 
+                      (safeParseNumber(filmmaker.filmmmakerFinanceMinimumWithdrawalAmount) || 100)
+        },
+        withdrawalSettings: {
+          payoutMethod: filmmaker.filmmmakerFinancePayoutMethod || "bank_transfer",
+          lastWithdrawalDate: filmmaker.filmmmakerFinanceLastWithdrawalDate,
+          nextPayoutDate: filmmaker.filmmmakerFinanceNextPayoutDate,
+          autoWithdrawalEnabled: filmmaker.filmmmakerFinanceAutoWithdrawal || false,
+          withdrawalThreshold: filmmaker.filmmmakerFinanceWithdrawalThreshold || 100
+        },
+        withdrawalHistory: formattedHistory,
+        recentWithdrawals,
+        // If you want to support pagination in the future
+        pagination: {
+          total: formattedHistory.length,
+          page: 1,
+          limit: 50,
+          pages: 1
+        }
       }
     });
   } catch (error) {
+    console.error("Error in getWithdrawalHistory:", error);
     res.status(500).json({ 
       success: false,
       message: "Server error", 
@@ -1350,3 +1446,186 @@ export const getPaymentMethod = async (req, res) => {
     });
   }
 }
+
+
+/**
+ * Get all filmmaker notifications (activity feed)
+ * GET /filmmaker/notifications
+ */
+export const getFilmmmakerNotifications = async (req, res) => {
+  try {
+    const filmmakerId = req.user.id || req.userId;
+
+    const filmmaker = await User.findByPk(filmmakerId);
+    if (!filmmaker || filmmaker.role !== "filmmaker") {
+      return res.status(404).json({
+        success: false,
+        message: "Filmmaker not found",
+      });
+    }
+
+    const notifications = [];
+
+    /* =========================
+       MOVIE & SERIES ACTIVITIES
+    ========================== */
+    const movies = await Movie.findAll({
+      where: { filmmakerId },
+      attributes: [
+        "id",
+        "title",
+        "status",
+        "contentType",
+        "createdAt",
+        "updatedAt",
+        "totalRevenue",
+        "totalViews",
+      ],
+      order: [["updatedAt", "DESC"]],
+    });
+
+    movies.forEach((movie) => {
+      // Upload / creation
+      notifications.push({
+        type: "content",
+        action: "created",
+        title: movie.title,
+        message: `${movie.contentType === "series" ? "Series" : "Movie"} "${movie.title}" was created`,
+        date: movie.createdAt,
+        referenceId: movie.id,
+      });
+
+      // Approval status changes
+      if (movie.status === "approved") {
+        notifications.push({
+          type: "content",
+          action: "approved",
+          title: movie.title,
+          message: `"${movie.title}" has been approved and is now live`,
+          date: movie.updatedAt,
+          referenceId: movie.id,
+        });
+      }
+
+      if (movie.status === "rejected") {
+        notifications.push({
+          type: "content",
+          action: "rejected",
+          title: movie.title,
+          message: `"${movie.title}" was rejected. Please review and resubmit`,
+          date: movie.updatedAt,
+          referenceId: movie.id,
+        });
+      }
+    });
+
+    /* =========================
+       PAYMENT / SALES ACTIVITIES
+    ========================== */
+    const payments = await Payment.findAll({
+      where: {
+        filmmakerId,
+        paymentStatus: "succeeded",
+      },
+      attributes: [
+        "id",
+        "amount",
+        "movieId",
+        "paymentMethod",
+        "createdAt",
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+
+    payments.forEach((payment) => {
+      notifications.push({
+        type: "payment",
+        action: "sale",
+        title: "New Sale",
+        message: `You earned ${safeParseNumber(payment.amount).toFixed(2)} from a movie purchase`,
+        date: payment.createdAt,
+        referenceId: payment.id,
+        meta: {
+          paymentMethod: payment.paymentMethod,
+          movieId: payment.movieId,
+        },
+      });
+    });
+
+    /* =========================
+       WITHDRAWAL ACTIVITIES
+    ========================== */
+    const withdrawals = filmmaker.filmmmakerFinanceWithdrawalHistory || [];
+
+    withdrawals.forEach((w) => {
+      notifications.push({
+        type: "withdrawal",
+        action: w.status,
+        title: "Withdrawal Update",
+        message:
+          w.status === "pending"
+            ? `Withdrawal request of ${safeParseNumber(w.amount).toFixed(2)} is pending`
+            : w.status === "completed"
+            ? `Withdrawal of ${safeParseNumber(w.amount).toFixed(2)} completed successfully`
+            : `Withdrawal of ${safeParseNumber(w.amount).toFixed(2)} was rejected`,
+        date: w.submittedAt || w.updatedAt || new Date(),
+        referenceId: w.id,
+      });
+    });
+
+    /* =========================
+       VERIFICATION & APPROVAL
+    ========================== */
+    if (filmmaker.filmmmakerIsVerified) {
+      notifications.push({
+        type: "verification",
+        action: "verified",
+        title: "Account Verified",
+        message: "Your filmmaker account has been verified",
+        date: filmmaker.updatedAt,
+      });
+    }
+
+    if (filmmaker.filmmmakerBankDetails?.isVerified) {
+      notifications.push({
+        type: "verification",
+        action: "bank_verified",
+        title: "Bank Details Verified",
+        message: "Your bank details have been verified and approved",
+        date: filmmaker.filmmmakerBankDetails.verifiedAt || filmmaker.updatedAt,
+      });
+    }
+
+    if (filmmaker.approvalStatus === "approved") {
+      notifications.push({
+        type: "approval",
+        action: "approved",
+        title: "Account Approved",
+        message: "Your filmmaker account has been approved by admin",
+        date: filmmaker.updatedAt,
+      });
+    }
+
+    /* =========================
+       SORT & PAGINATE
+    ========================== */
+    notifications.sort(
+      (a, b) => new Date(b.date) - new Date(a.date)
+    );
+
+    res.status(200).json({
+      success: true,
+      data: {
+        total: notifications.length,
+        notifications,
+      },
+    });
+  } catch (error) {
+    console.error("Error in getFilmmmakerNotificationsAllActivities:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
