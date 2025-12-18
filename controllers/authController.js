@@ -470,3 +470,50 @@ const generateDeviceId = (req) => {
     const rawId = `${userAgent}-${ipAddress}`;
     return crypto.createHash('sha256').update(rawId).digest('hex');
 };
+
+// Get User Profile/Information
+export const getProfileUser = async (req, res) => {
+    try {
+        const user = await User.findByPk(req.userId, {
+            attributes: [
+                'id', 
+                'name', 
+                'email', 
+                'role', 
+                'isUpgraded',
+                'maxDevices', 
+                'activeDevices',
+                'createdAt',
+                'updatedAt'
+            ]
+        });
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        // Calculate current devices count
+        const currentDevices = Array.isArray(user.activeDevices) ? user.activeDevices.length : 0;
+
+        res.status(200).json({
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            isUpgraded: user.isUpgraded,
+            isSubscribed: user.isSubscribed || false,
+            maxDevices: user.maxDevices,
+            currentDevices: currentDevices,
+            activeDevices: user.activeDevices || [],
+            createdAt: user.createdAt,
+            updatedAt: user.updatedAt
+        });
+    } catch (error) {
+        console.error('Get profile error:', error);
+        res.status(500).json({ 
+            message: "Server error", 
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+};

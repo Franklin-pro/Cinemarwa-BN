@@ -10,7 +10,8 @@ import {
     upgradeUser,
     getActiveDevices,
     removeDevice,
-    loginWithGoogle
+    loginWithGoogle,
+    getProfileUser
 } from "../controllers/authController.js";
 import { authenticateToken, requireUpgrade } from "../middleware/authMiddleware.js";
 import passport from "passport";
@@ -24,6 +25,7 @@ router.post("/resend-otp", resendOTP);
 router.post("/logout", authenticateToken, logout);
 router.post("/logout-all", authenticateToken, logoutAll);
 router.get("/devices", authenticateToken, getActiveDevices);
+router.get("/me", authenticateToken, getProfileUser);
 router.get(
   "/google",
   passport.authenticate("google", { scope: ["profile", "email"] })
