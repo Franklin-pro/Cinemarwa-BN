@@ -553,7 +553,7 @@ export const getMovieAnalytics = async (req, res) => {
     const { movieId } = req.params;
 
     const movie = await Movie.findByPk(movieId, {
-      attributes: ["id", "title", "description", "status", "totalViews", "totalRevenue", "avgRating", "totalReviews", "createdAt", "viewPrice", "downloadPrice", "currency", "royaltyPercentage", "filmmakerId"]
+      attributes: ["id", "title", "description", "status", "totalViews", "totalRevenue", "avgRating", "totalReviews", "createdAt", "viewPrice", "downloadPrice", "currency", "filmmakerId"]
     });
 
     if (!movie) {
@@ -657,6 +657,276 @@ export const getMovieAnalytics = async (req, res) => {
     });
   } catch (error) {
     console.error("Error in getMovieAnalytics:", error);
+    res.status(500).json({ 
+      success: false,
+      message: "Server error", 
+      error: error.message 
+    });
+  }
+};
+/**
+ * Get comprehensive filmmaker analytics
+ * GET /filmmaker/analytics
+ */
+export const getFilmmakerAnalytics = async (req, res) => {
+  try {
+    const GATEWAY_FEE_PERCENT = 6; // 6% MTN gateway fee
+    const filmmakerId = req.user.id || req.userId;
+    const { period = '30' } = req.query; // days: 7, 30, 90, 365, or 'all'
+
+    const filmmaker = await User.findByPk(filmmakerId);
+
+    if (!filmmaker || filmmaker.role !== "filmmaker") {
+      return res.status(404).json({ 
+        success: false,
+        message: "Filmmaker not found" 
+      });
+    }
+
+    // Calculate date range
+    const now = new Date();
+    const startDate = period === 'all' 
+      ? new Date(0) // Beginning of time
+      : new Date(now.getTime() - (parseInt(period) * 24 * 60 * 60 * 1000));
+
+    // ====== GET ALL MOVIES ======
+    const movies = await Movie.findAll({
+      where: { filmmakerId },
+      attributes: [
+        "id", "title", "contentType", "status", "totalViews", 
+        "totalRevenue", "avgRating", "totalReviews", "viewPrice", 
+        "downloadPrice", "createdAt", "updatedAt"
+      ]
+    });
+
+    // ====== GET PAYMENTS IN PERIOD ======
+    const payments = await Payment.findAll({
+      where: {
+        filmmakerId,
+        paymentStatus: "succeeded",
+        createdAt: {
+          [Op.gte]: startDate
+        }
+      },
+      attributes: [
+        "id", "amount", "paymentMethod", "movieId", 
+        "userId", "createdAt", "filmmakerAmount"
+      ],
+      order: [["createdAt", "DESC"]]
+    });
+
+    // ====== REVENUE ANALYTICS ======
+    let grossRevenue = 0;
+    let netRevenue = 0; // After gateway fee
+    let totalGatewayFees = 0;
+    let filmmakerEarnings = 0;
+
+    payments.forEach(payment => {
+      const amount = safeParseNumber(payment.amount);
+      grossRevenue += amount;
+      
+      const gatewayFee = (amount * GATEWAY_FEE_PERCENT) / 100;
+      const amountAfterFee = amount - gatewayFee;
+      netRevenue += amountAfterFee;
+      totalGatewayFees += gatewayFee;
+
+      // Calculate filmmaker share
+      const filmmakerAmount = safeParseNumber(payment.filmmakerAmount);
+      if (filmmakerAmount > 0) {
+        const fmGatewayFee = (filmmakerAmount * GATEWAY_FEE_PERCENT) / 100;
+        filmmakerEarnings += (filmmakerAmount - fmGatewayFee);
+      } else {
+        const royalty = safeParseNumber(payment.royaltyPercentage) || 70;
+        filmmakerEarnings += (amountAfterFee * royalty) / 100;
+      }
+    });
+
+    // ====== VIEWS ANALYTICS ======
+    const totalViews = movies.reduce((sum, movie) => 
+      sum + safeParseNumber(movie.totalViews), 0
+    );
+
+    // ====== CONTENT ANALYTICS ======
+    const contentByType = movies.reduce((acc, movie) => {
+      const type = movie.contentType || "movie";
+      if (!acc[type]) {
+        acc[type] = { count: 0, views: 0, revenue: 0 };
+      }
+      acc[type].count++;
+      acc[type].views += safeParseNumber(movie.totalViews);
+      acc[type].revenue += safeParseNumber(movie.totalRevenue);
+      return acc;
+    }, {});
+
+    const contentByStatus = movies.reduce((acc, movie) => {
+      const status = movie.status || "unknown";
+      if (!acc[status]) acc[status] = 0;
+      acc[status]++;
+      return acc;
+    }, {});
+
+    // ====== PAYMENT METHOD ANALYTICS ======
+    const paymentsByMethod = payments.reduce((acc, payment) => {
+      const method = payment.paymentMethod || "unknown";
+      if (!acc[method]) {
+        acc[method] = { count: 0, amount: 0 };
+      }
+      acc[method].count++;
+      acc[method].amount += safeParseNumber(payment.amount);
+      return acc;
+    }, {});
+
+    // ====== TOP PERFORMING CONTENT ======
+    const topByRevenue = [...movies]
+      .sort((a, b) => safeParseNumber(b.totalRevenue) - safeParseNumber(a.totalRevenue))
+      .slice(0, 5)
+      .map(movie => ({
+        id: movie.id,
+        title: movie.title,
+        contentType: movie.contentType,
+        revenue: safeParseNumber(movie.totalRevenue),
+        views: safeParseNumber(movie.totalViews),
+        rating: safeParseNumber(movie.avgRating)
+      }));
+
+    const topByViews = [...movies]
+      .sort((a, b) => safeParseNumber(b.totalViews) - safeParseNumber(a.totalViews))
+      .slice(0, 5)
+      .map(movie => ({
+        id: movie.id,
+        title: movie.title,
+        contentType: movie.contentType,
+        views: safeParseNumber(movie.totalViews),
+        revenue: safeParseNumber(movie.totalRevenue),
+        rating: safeParseNumber(movie.avgRating)
+      }));
+
+    // ====== TIMELINE DATA (Daily breakdown) ======
+    const timeline = {};
+    payments.forEach(payment => {
+      const date = new Date(payment.createdAt).toISOString().split('T')[0];
+      if (!timeline[date]) {
+        timeline[date] = { sales: 0, revenue: 0, views: 0 };
+      }
+      timeline[date].sales++;
+      timeline[date].revenue += safeParseNumber(payment.amount);
+    });
+
+    const timelineArray = Object.entries(timeline)
+      .map(([date, data]) => ({ date, ...data }))
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    // ====== GROWTH METRICS ======
+    const previousPeriodStart = new Date(startDate.getTime() - (parseInt(period) * 24 * 60 * 60 * 1000));
+    
+    const previousPayments = await Payment.findAll({
+      where: {
+        filmmakerId,
+        paymentStatus: "succeeded",
+        createdAt: {
+          [Op.gte]: previousPeriodStart,
+          [Op.lt]: startDate
+        }
+      },
+      attributes: ["amount"]
+    });
+
+    let previousRevenue = 0;
+    previousPayments.forEach(p => {
+      previousRevenue += safeParseNumber(p.amount);
+    });
+
+    const revenueGrowth = previousRevenue > 0 
+      ? ((grossRevenue - previousRevenue) / previousRevenue) * 100 
+      : grossRevenue > 0 ? 100 : 0;
+
+    const salesGrowth = previousPayments.length > 0
+      ? ((payments.length - previousPayments.length) / previousPayments.length) * 100
+      : payments.length > 0 ? 100 : 0;
+
+    // ====== AVERAGE METRICS ======
+    const avgRating = movies.length > 0
+      ? movies.reduce((sum, m) => sum + safeParseNumber(m.avgRating), 0) / movies.length
+      : 0;
+
+    const avgRevenuePerSale = payments.length > 0
+      ? grossRevenue / payments.length
+      : 0;
+
+    const avgViewsPerContent = movies.length > 0
+      ? totalViews / movies.length
+      : 0;
+
+    // ====== CONVERSION METRICS ======
+    const uniqueViewers = new Set(payments.map(p => p.userId)).size;
+    const conversionRate = totalViews > 0 
+      ? (payments.length / totalViews) * 100 
+      : 0;
+
+    // ====== RESPONSE ======
+    res.status(200).json({
+      success: true,
+      data: {
+        period: {
+          days: period === 'all' ? 'all' : parseInt(period),
+          startDate,
+          endDate: now,
+          label: period === '7' ? 'Last 7 days' :
+                 period === '30' ? 'Last 30 days' :
+                 period === '90' ? 'Last 90 days' :
+                 period === '365' ? 'Last year' : 'All time'
+        },
+        summary: {
+          totalContent: movies.length,
+          totalViews,
+          totalSales: payments.length,
+          grossRevenue: parseFloat(grossRevenue.toFixed(2)),
+          gatewayFees: parseFloat(totalGatewayFees.toFixed(2)),
+          netRevenue: parseFloat(netRevenue.toFixed(2)),
+          filmmakerEarnings: parseFloat(filmmakerEarnings.toFixed(2)),
+          platformFee: parseFloat((netRevenue - filmmakerEarnings).toFixed(2)),
+          avgRating: parseFloat(avgRating.toFixed(1)),
+          uniqueViewers,
+          conversionRate: parseFloat(conversionRate.toFixed(2))
+        },
+        growth: {
+          revenueGrowth: parseFloat(revenueGrowth.toFixed(1)),
+          salesGrowth: parseFloat(salesGrowth.toFixed(1)),
+          previousPeriodRevenue: parseFloat(previousRevenue.toFixed(2)),
+          previousPeriodSales: previousPayments.length
+        },
+        averages: {
+          revenuePerSale: parseFloat(avgRevenuePerSale.toFixed(2)),
+          viewsPerContent: parseFloat(avgViewsPerContent.toFixed(0)),
+          salesPerDay: parseFloat((payments.length / parseInt(period || 30)).toFixed(2)),
+          revenuePerDay: parseFloat((grossRevenue / parseInt(period || 30)).toFixed(2))
+        },
+        contentBreakdown: {
+          byType: contentByType,
+          byStatus: contentByStatus
+        },
+        paymentMethods: Object.entries(paymentsByMethod).map(([method, data]) => ({
+          method,
+          count: data.count,
+          amount: parseFloat(data.amount.toFixed(2)),
+          percentage: parseFloat((data.count / payments.length * 100).toFixed(1))
+        })),
+        topPerforming: {
+          byRevenue: topByRevenue,
+          byViews: topByViews
+        },
+        timeline: timelineArray,
+        financialSummary: {
+          grossPendingBalance: parseFloat(safeParseNumber(filmmaker.filmmmakerFinancePendingBalance).toFixed(2)),
+          availableBalance: parseFloat((safeParseNumber(filmmaker.filmmmakerFinancePendingBalance) * (1 - GATEWAY_FEE_PERCENT / 100)).toFixed(2)),
+          withdrawnBalance: parseFloat(safeParseNumber(filmmaker.filmmmakerFinanceWithdrawnBalance).toFixed(2)),
+          totalEarned: parseFloat(safeParseNumber(filmmaker.filmmmakerFinanceTotalEarned || filmmakerEarnings).toFixed(2)),
+          gatewayFeePercent: GATEWAY_FEE_PERCENT
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Error in getFilmmakerAnalytics:", error);
     res.status(500).json({ 
       success: false,
       message: "Server error", 
@@ -1147,7 +1417,6 @@ export const editFilmmmakerMovie = async (req, res) => {
       "downloadPrice",
       "currency",
       "language",
-      "royaltyPercentage",
       "status"
     ];
     
