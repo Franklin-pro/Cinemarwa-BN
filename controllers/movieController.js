@@ -1,9 +1,12 @@
 import Movie from "../models/Movie.model.js";
-import UserAccess from "../models/userAccess.model.js"
+import UserAccess from "../models/userAccess.model.js";
+import Review from "../models/Review.model.js";
 import User from "../models/User.modal.js";
+import Share from "../models/share.model.js";
 import slugify from "slugify";
-import { uploadToB2, deleteFromB2 } from "../utils/backblazeB2.js";
+import { uploadToB2, deleteFromB2, clearUrl, getBunnyCDNUrl, getStreamingUrls } from "../utils/backblazeB2.js"; 
 import { Op } from "sequelize";
+import sequelize from "../config/database.js";
 
 // Helper function to calculate expiry date
 function calculateExpiryDate(period) {
@@ -40,7 +43,7 @@ function getAccessPeriodLabel(period) {
 
 // ====== CRUD OPERATIONS ======
 
-// 📌 Upload/Create Movie (Filmmaker) - FIXED VERSION
+// 📌 Upload/Create Movie (Filmmaker)
 export const addMovie = async (req, res) => {
   try {
     // Extract form data
@@ -48,7 +51,7 @@ export const addMovie = async (req, res) => {
       title,
       original_title,
       overview,
-      description, // Add description as alternative
+      description,
       release_date,
       viewPrice,
       downloadPrice,
@@ -62,6 +65,7 @@ export const addMovie = async (req, res) => {
       tags,
       keywords,
       categories,
+      youtubeTrailerLink,
       
       // New fields for series
       contentType: rawContentType = "movie",
@@ -75,9 +79,8 @@ export const addMovie = async (req, res) => {
       releaseSchedule,
     } = req.body;
 
-    // Ensure contentType is a string (handle if it comes as array)
+    // Ensure contentType is a string
     const contentType = Array.isArray(rawContentType) ? rawContentType[0] : rawContentType;
-    // Use overview OR description (whichever is provided)
     const contentDescription = overview || description;
 
     // Validate required fields
@@ -91,7 +94,6 @@ export const addMovie = async (req, res) => {
     // Ensure title is a string
     const titleStr = String(title || '');
     
-    // Validate title length
     if (titleStr.trim().length < 3) {
       return res.status(400).json({
         success: false,
@@ -99,10 +101,8 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Ensure description is a string
     const descriptionStr = String(contentDescription || '');
     
-    // Validate overview/description length
     if (descriptionStr.trim().length < 20) {
       return res.status(400).json({
         success: false,
@@ -119,7 +119,6 @@ export const addMovie = async (req, res) => {
         });
       }
       
-      // Check if series exists
       const series = await Movie.findByPk(seriesId);
       if (!series || series.contentType !== "series") {
         return res.status(400).json({
@@ -128,7 +127,6 @@ export const addMovie = async (req, res) => {
         });
       }
       
-      // Check if episode already exists
       const existingEpisode = await Movie.findOne({
         where: {
           seriesId,
@@ -146,37 +144,23 @@ export const addMovie = async (req, res) => {
       }
     }
 
-    // If creating a series, validate series-specific fields
-    if (contentType === "series") {
-      if (!releaseSchedule) {
-        return res.status(400).json({
-          success: false,
-          message: "Release schedule is required for series",
-        });
-      }
+    if (contentType === "series" && !releaseSchedule) {
+      return res.status(400).json({
+        success: false,
+        message: "Release schedule is required for series",
+      });
     }
 
-    // Check if files are uploaded based on content type
+    // Check if files are uploaded
     if (contentType === "series") {
-      // Series only needs poster and backdrop, NO video file
       if (!req.files || !req.files.posterFile || !req.files.backdropFile) {
-        console.error("❌ Missing files for series:", {
-          hasPosterFile: !!req.files?.posterFile,
-          hasBackdropFile: !!req.files?.backdropFile,
-        });
         return res.status(400).json({
           success: false,
           message: "Poster image and backdrop image are required for series",
         });
       }
     } else {
-      // Movies and episodes need all files
       if (!req.files || !req.files.videoFile || !req.files.posterFile || !req.files.backdropFile) {
-        console.error("❌ Missing files:", {
-          hasVideoFile: !!req.files?.videoFile,
-          hasPosterFile: !!req.files?.posterFile,
-          hasBackdropFile: !!req.files?.backdropFile,
-        });
         return res.status(400).json({
           success: false,
           message: "Video file, poster image, and backdrop image are required",
@@ -184,7 +168,7 @@ export const addMovie = async (req, res) => {
       }
     }
 
-    // Validate video file if provided (only for movies and episodes)
+    // Validate video file
     if (contentType !== "series" && req.files?.videoFile && !req.files.videoFile[0].mimetype.startsWith("video/")) {
       return res.status(400).json({
         success: false,
@@ -192,7 +176,6 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Validate video file size (5GB = 5 * 1024 * 1024 * 1024 bytes)
     if (contentType !== "series" && req.files?.videoFile && req.files.videoFile[0].size > 5 * 1024 * 1024 * 1024) {
       return res.status(400).json({
         success: false,
@@ -200,7 +183,7 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Validate poster image if provided
+    // Validate images
     if (req.files?.posterFile && !req.files.posterFile[0].mimetype.startsWith("image/")) {
       return res.status(400).json({
         success: false,
@@ -208,7 +191,6 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Validate backdrop image if provided
     if (req.files?.backdropFile && !req.files.backdropFile[0].mimetype.startsWith("image/")) {
       return res.status(400).json({
         success: false,
@@ -216,23 +198,20 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Parse categories robustly. Accept comma-separated string, array, or JSON stringified array
+    // Parse categories
     let parsedCategories = [];
     if (categories) {
       if (typeof categories === "string") {
         const trimmed = categories.trim();
-        // If looks like a JSON array, try to parse it
         if (trimmed.startsWith("[")) {
           try {
             const parsed = JSON.parse(trimmed);
             if (Array.isArray(parsed)) {
               parsedCategories = parsed.map((cat) => String(cat).trim()).filter(Boolean);
             } else {
-              // fallback to comma split
               parsedCategories = trimmed.split(",").map((cat) => cat.replace(/^[\[\]"]+|[\[\]"]+$/g, "").trim()).filter(Boolean);
             }
           } catch (err) {
-            // if JSON.parse fails, fallback to comma-separated parsing
             parsedCategories = trimmed.split(",").map((cat) => cat.replace(/^[\[\]"]+|[\[\]"]+$/g, "").trim()).filter(Boolean);
           }
         } else {
@@ -243,36 +222,24 @@ export const addMovie = async (req, res) => {
       }
     }
 
-    // Validate categories ONLY for movies and series (NOT for episodes)
-    // Episodes inherit categories from their parent series
-    if (contentType === "movie" || contentType === "series") {
-      if (!parsedCategories || parsedCategories.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: "At least one category is required for movies and series",
-        });
-      }
+    if ((contentType === "movie" || contentType === "series") && (!parsedCategories || parsedCategories.length === 0)) {
+      return res.status(400).json({
+        success: false,
+        message: "At least one category is required for movies and series",
+      });
     }
 
-    // Parse and validate pricing
+    // Parse pricing
     const parsedViewPrice = parseFloat(viewPrice) || 0;
     const parsedDownloadPrice = parseFloat(downloadPrice) || 0;
 
-    if (parsedViewPrice < 0) {
+    if (parsedViewPrice < 0 || parsedDownloadPrice < 0) {
       return res.status(400).json({
         success: false,
-        message: "View price cannot be negative",
+        message: "Prices cannot be negative",
       });
     }
 
-    if (parsedDownloadPrice < 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Download price cannot be negative",
-      });
-    }
-
-    // Validate royalty percentage
     const parsedRoyalty = parseInt(royaltyPercentage) || 70;
     if (parsedRoyalty < 0 || parsedRoyalty > 100) {
       return res.status(400).json({
@@ -281,10 +248,9 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Generate slug based on content type
+    // Generate slug
     let slug;
     if (contentType === "episode") {
-      // Get series info for episode slug
       const series = await Movie.findByPk(seriesId);
       slug = slugify(
         `${series.title}-s${seasonNumber}e${episodeNumber}-${episodeTitle || title}`,
@@ -294,13 +260,12 @@ export const addMovie = async (req, res) => {
       slug = slugify(title, { lower: true, strict: true });
     }
     
-    // Check if slug already exists
     const existingMovie = await Movie.findOne({ where: { slug } });
     if (existingMovie) {
       slug = `${slug}-${Date.now()}`;
     }
 
-    // Handle file uploads based on content type
+    // Upload files
     let videoUploadResult = null;
     let posterUploadResult = null;
     let backdropUploadResult = null;
@@ -308,7 +273,6 @@ export const addMovie = async (req, res) => {
     if (req.files) {
       const { videoFile, posterFile, backdropFile } = req.files;
 
-      // Upload video for movies and episodes ONLY (not for series)
       if (contentType !== "series" && videoFile && videoFile[0]) {
         videoUploadResult = await uploadToB2(
           videoFile[0].buffer,
@@ -321,7 +285,6 @@ export const addMovie = async (req, res) => {
         );
       }
 
-      // Upload poster for ALL content types
       if (posterFile && posterFile[0]) {
         posterUploadResult = await uploadToB2(
           posterFile[0].buffer,
@@ -335,7 +298,6 @@ export const addMovie = async (req, res) => {
         );
       }
 
-      // Upload backdrop for ALL content types
       if (backdropFile && backdropFile[0]) {
         backdropUploadResult = await uploadToB2(
           backdropFile[0].buffer,
@@ -365,7 +327,7 @@ export const addMovie = async (req, res) => {
         : keywords;
     }
 
-    // Get series info if this is an episode
+    // Get series info for episodes
     let seriesInfo = {};
     if (contentType === "episode" && seriesId) {
       const series = await Movie.findByPk(seriesId);
@@ -403,27 +365,14 @@ export const addMovie = async (req, res) => {
       };
     }
 
-    // Parse release schedule for series
-    let parsedReleaseSchedule = {};
-    if (releaseSchedule) {
-      try {
-        parsedReleaseSchedule = typeof releaseSchedule === "string"
-          ? JSON.parse(releaseSchedule)
-          : releaseSchedule;
-      } catch (error) {
-        console.error("Error parsing release schedule:", error);
-      }
-    }
-
-    // Create movie/series/episode - USE descriptionStr instead of contentDescription
+    // Create content
     const newContent = await Movie.create({
       title: titleStr.trim(),
-      description: descriptionStr.trim(), // Use the string version
+      description: descriptionStr.trim(),
       release_date: release_date || new Date().toISOString().split("T")[0],
       slug,
       contentType,
       
-      // Series/episode fields
       ...(contentType === "episode" && {
         seriesId,
         seasonNumber: parseInt(seasonNumber),
@@ -434,7 +383,6 @@ export const addMovie = async (req, res) => {
         totalSeasons: parseInt(totalSeasons),
       }),
       
-      // Video URLs (only for movies and episodes)
       ...(contentType !== "series" && videoUploadResult && {
         videoUrl: videoUploadResult.secure_url,
         streamingUrl: videoUploadResult.secure_url,
@@ -443,7 +391,6 @@ export const addMovie = async (req, res) => {
         fileSize: Math.round(req.files.videoFile[0].size / (1024 * 1024)),
       }),
       
-      // Image URLs (if uploaded)
       ...(posterUploadResult && {
         poster: posterUploadResult.secure_url,
         posterPublicId: posterUploadResult.public_id,
@@ -454,36 +401,33 @@ export const addMovie = async (req, res) => {
         backdropPublicId: backdropUploadResult.public_id,
       }),
       
-      // Filmmaker info
       filmmakerId: req.user.id,
       
-      // Pricing
       viewPrice: parsedViewPrice,
       downloadPrice: parsedDownloadPrice,
       price: parsedViewPrice,
       currency: currency || "RWF",
       royaltyPercentage: parsedRoyalty,
       
-      // Categories and tags (use series categories for episodes)
       categories: contentType === "episode" ? seriesInfo.categories : parsedCategories,
       tags: contentType === "episode" ? seriesInfo.tags : parsedTags,
       
-      // Settings
       language: contentType === "episode" ? seriesInfo.language : (language || "en"),
       
-      // Status
+      youtubeTrailerLink: youtubeTrailerLink || "",
+      site: youtubeTrailerLink ? "youtube" : "",
+      
       status: "submitted",
       uploadedAt: new Date(),
       processingStatus: "completed",
       
-      // Initialize counters
       totalViews: 0,
       totalRevenue: 0,
       avgRating: 0,
       totalReviews: 0,
     });
 
-    // Update series episode count if this is an episode
+    // Update series episode count
     if (contentType === "episode") {
       const episodeCount = await Movie.count({
         where: {
@@ -499,20 +443,22 @@ export const addMovie = async (req, res) => {
       );
     }
 
-    // Return success response
+    // Return response
     const responseData = {
       id: newContent.id,
       title: newContent.title,
       slug: newContent.slug,
       contentType: newContent.contentType,
       status: newContent.status,
-      poster: newContent.poster,
-      backdrop: newContent.backdrop,
+      poster: clearUrl(newContent.poster),
+      backdrop: clearUrl(newContent.backdrop),
       viewPrice: newContent.viewPrice,
       downloadPrice: newContent.downloadPrice,
       currency: newContent.currency,
       categories: newContent.categories,
-    };
+      youtubeTrailerLink: newContent.youtubeTrailerLink || null,
+      site: newContent.site || null,
+    }; 
 
     if (contentType === "episode") {
       responseData.seriesId = newContent.seriesId;
@@ -537,7 +483,6 @@ export const addMovie = async (req, res) => {
   } catch (error) {
     console.error("❌ Error uploading content:", error);
 
-    // Handle Sequelize validation errors
     if (error.name === "SequelizeValidationError") {
       const messages = error.errors.map((err) => err.message);
       return res.status(400).json({
@@ -547,7 +492,6 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Handle duplicate slug error
     if (error.name === "SequelizeUniqueConstraintError") {
       return res.status(400).json({
         success: false,
@@ -555,7 +499,6 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Handle B2 upload errors
     if (error.message && (error.message.includes("B2") || error.message.includes("upload"))) {
       return res.status(500).json({
         success: false,
@@ -563,7 +506,6 @@ export const addMovie = async (req, res) => {
       });
     }
 
-    // Generic error
     res.status(500).json({
       success: false,
       message: "Failed to upload content. Please try again later.",
@@ -572,7 +514,7 @@ export const addMovie = async (req, res) => {
   }
 };
 
-// 📌 Get All Movies (with filtering for all content types)
+// 📌 Get All Movies (with filtering)
 export const getAllMovies = async (req, res) => {
   try {
     const {
@@ -590,56 +532,46 @@ export const getAllMovies = async (req, res) => {
       freeToView,
       freeToDownload,
       
-      // New filters
       contentType,
       seriesId,
       season,
       filmmakerId,
-      excludeEpisodes = "true", // Default to TRUE to exclude episodes
+      excludeEpisodes = "true",
       minRating,
       maxRating,
     } = req.query;
 
-    // Build WHERE clause for Sequelize
     const where = {};
     
-    // Status filter
     if (status) {
       where.status = status;
     } else {
       where.status = "approved";
     }
 
-    // Content type filter
     if (contentType) {
       where.contentType = contentType;
     } else if (excludeEpisodes === "true") {
-      // DEFAULT: Exclude episodes, only show movies and series
       where.contentType = { [Op.in]: ["movie", "series"] };
     }
 
-    // Series filter - if seriesId provided, show episodes
     if (seriesId) {
       where.seriesId = seriesId;
       where.contentType = "episode";
     }
 
-    // Season filter (for episodes)
     if (season) {
       where.seasonNumber = parseInt(season);
     }
 
-    // Filmmaker filter
     if (filmmakerId) {
       where.filmmakerId = filmmakerId;
     }
 
-    // Category filter
     if (category) {
       where.categories = { [Op.contains]: [category] };
     }
 
-    // Search filter
     if (search) {
       where[Op.or] = [
         { title: { [Op.iLike]: `%${search}%` } },
@@ -647,7 +579,6 @@ export const getAllMovies = async (req, res) => {
       ];
     }
 
-    // Rating filters
     if (minRating !== undefined) {
       where.avgRating = { ...where.avgRating, [Op.gte]: parseFloat(minRating) };
     }
@@ -655,7 +586,6 @@ export const getAllMovies = async (req, res) => {
       where.avgRating = { ...where.avgRating, [Op.lte]: parseFloat(maxRating) };
     }
 
-    // Price filters
     if (freeToView === "true") {
       where.viewPrice = 0;
     } else {
@@ -678,19 +608,14 @@ export const getAllMovies = async (req, res) => {
       }
     }
 
-    // Handle "upcoming" filter
     if (sortBy === "upcoming") {
       where.release_date = { [Op.gt]: new Date() };
     }
 
-    // Pagination
     const offset = (parseInt(page) - 1) * parseInt(limit);
-
-    // Sorting
     const sortOrder = order === "asc" ? "ASC" : "DESC";
     let orderOptions = [];
     
-    // Handle different sort options - map query params to actual database columns
     switch (sortBy) {
       case "popular":
         orderOptions = [['totalViews', 'DESC']];
@@ -699,7 +624,7 @@ export const getAllMovies = async (req, res) => {
         orderOptions = [['totalViews', 'DESC'], ['createdAt', 'DESC']];
         break;
       case "top-rated":
-        orderOptions = [['avgRating', 'DESC'], ['totalReviews', 'DESC']];
+        orderOptions = [['vote_average', 'DESC'], ['totalReviews', 'DESC']];
         break;
       case "recent":
         orderOptions = [['createdAt', 'DESC']];
@@ -719,11 +644,10 @@ export const getAllMovies = async (req, res) => {
       case "popularity":
         orderOptions = [['popularity', 'DESC']];
         break;
-      case "upcoming": // Handle upcoming properly - use release_date for future content
+      case "upcoming":
         orderOptions = [['release_date', 'ASC']];
         break;
       default:
-        // Only allow sorting by actual database columns
         const validColumns = [
           'createdAt', 'updatedAt', 'title', 'release_date', 'viewPrice', 
           'downloadPrice', 'totalViews', 'avgRating', 'totalReviews', 
@@ -733,12 +657,10 @@ export const getAllMovies = async (req, res) => {
         if (validColumns.includes(sortBy)) {
           orderOptions = [[sortBy, sortOrder]];
         } else {
-          // Default to createdAt if invalid column
           orderOptions = [['createdAt', 'DESC']];
         }
     }
 
-    // For episodes, sort by season and episode number
     if (contentType === "episode" || seriesId) {
       orderOptions = [
         ['seasonNumber', 'ASC'],
@@ -747,7 +669,6 @@ export const getAllMovies = async (req, res) => {
       ];
     }
 
-    // Execute query with Sequelize
     const { count, rows: movies } = await Movie.findAndCountAll({
       where,
       order: orderOptions,
@@ -755,7 +676,6 @@ export const getAllMovies = async (req, res) => {
       limit: parseInt(limit),
     });
 
-    // Transform response based on content type
     const transformedMovies = movies.map(movie => {
       const base = {
         id: movie.id,
@@ -763,13 +683,14 @@ export const getAllMovies = async (req, res) => {
         slug: movie.slug,
         contentType: movie.contentType,
         description: movie.description,
-        overview: movie.description, // For backward compatibility
-        poster: movie.poster,
-        backdrop: movie.backdrop,
+        overview: movie.description,
+        poster: clearUrl(movie.poster),
+        backdrop: clearUrl(movie.backdrop),
         viewPrice: movie.viewPrice,
         downloadPrice: movie.downloadPrice,
         currency: movie.currency,
         avgRating: movie.avgRating,
+        vote_average: movie.vote_average,
         totalViews: movie.totalViews,
         totalReviews: movie.totalReviews,
         status: movie.status,
@@ -832,8 +753,6 @@ export const getAllMovies = async (req, res) => {
   }
 };
 
-
-
 export const getFilmmakerSeries = async (req, res) => {
   try {
     const { filmmakerId } = req.params;
@@ -841,7 +760,7 @@ export const getFilmmakerSeries = async (req, res) => {
       where: {
         filmmakerId,
         contentType: "series",
-        status: { [Op.in]: ["approved", "submitted"] } // <-- Include both statuses
+        status: { [Op.in]: ["approved", "submitted"] }
       },
       order: [["createdAt", "DESC"]]
     });
@@ -858,7 +777,7 @@ export const getFilmmakerSeries = async (req, res) => {
       error: process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }
-}
+};
 
 // 📌 Get Movie by ID or Slug
 export const getMovieById = async (req, res) => {
@@ -866,10 +785,8 @@ export const getMovieById = async (req, res) => {
     const { id } = req.params;
     const userId = req.user?.id;
 
-    // Try to find by ID first
     let movie = await Movie.findByPk(id);
 
-    // If not found by ID, try by slug
     if (!movie) {
       movie = await Movie.findOne({
         where: { slug: id }
@@ -883,15 +800,12 @@ export const getMovieById = async (req, res) => {
       });
     }
 
-    // Check if user has access
     let userHasAccess = false;
     let accessType = null;
     let expiresAt = null;
     let accessDetails = null;
 
     if (userId) {
-      
-      // Check individual access - simplified query
       let individualAccess = await UserAccess.findOne({
         where: {
           userId: userId,
@@ -900,7 +814,6 @@ export const getMovieById = async (req, res) => {
         },
       });
 
-      // If found, check if it's still valid (or has no expiry)
       if (individualAccess) {
         const hasExpiry = individualAccess.expiresAt !== null && individualAccess.expiresAt !== undefined;
         const isExpired = hasExpiry && new Date(individualAccess.expiresAt) <= new Date();
@@ -910,13 +823,9 @@ export const getMovieById = async (req, res) => {
           accessType = "individual";
           expiresAt = individualAccess.expiresAt;
           accessDetails = individualAccess;
-          // console.log(`   ✅ Access GRANTED`);
-        } else {
-          console.log(`   ❌ Access expired`);
         }
       }
 
-      // Check series access if this is an episode
       if (!userHasAccess && movie.contentType === "episode" && movie.seriesId) {
         const seriesAccess = await UserAccess.findOne({
           where: {
@@ -935,18 +844,15 @@ export const getMovieById = async (req, res) => {
             accessType = "series";
             expiresAt = seriesAccess.expiresAt;
             accessDetails = seriesAccess;
-            // console.log(`   ✅ Series access GRANTED`);
           }
         }
       }
 
-      // Check if user is the filmmaker
       if (!userHasAccess && movie.filmmakerId === userId) {
         userHasAccess = true;
         accessType = "owner";
       }
 
-      // Check if user has active subscription
       if (!userHasAccess) {
         const user = await User.findByPk(userId);
         if (user && user.isUpgraded && user.subscription) {
@@ -966,17 +872,14 @@ export const getMovieById = async (req, res) => {
       }
     }
 
-    // Increment view count if user has access or content is free
     if (userHasAccess || movie.viewPrice === 0) {
       movie.totalViews = (movie.totalViews || 0) + 1;
       await movie.save();
     }
 
-    // Get additional data based on content type
     let additionalData = {};
     
     if (movie.contentType === "series") {
-      // Get episodes for series
       const episodes = await Movie.findAll({
         where: {
           seriesId: movie.id,
@@ -999,7 +902,6 @@ export const getMovieById = async (req, res) => {
         }
       });
 
-      // Get seasons
       const seasonsData = await Movie.findAll({
         where: {
           seriesId: movie.id,
@@ -1018,11 +920,9 @@ export const getMovieById = async (req, res) => {
     }
 
     if (movie.contentType === "episode") {
-      // Get series info
       const series = await Movie.findByPk(movie.seriesId);
       additionalData.series = series;
 
-      // Get next and previous episodes
       const [nextEpisode, previousEpisode] = await Promise.all([
         Movie.findOne({
           where: {
@@ -1060,6 +960,13 @@ export const getMovieById = async (req, res) => {
       ...additionalData
     };
 
+    // Normalize URLs to use Bunny CDN
+    responseData.poster = clearUrl(responseData.poster);
+    responseData.backdrop = clearUrl(responseData.backdrop);
+    responseData.videoUrl = getBunnyCDNUrl(responseData.videoUrl);
+    responseData.streamingUrl = getBunnyCDNUrl(responseData.streamingUrl);
+    responseData.hlsUrl = getBunnyCDNUrl(responseData.hlsUrl);
+
     res.status(200).json({
       success: true,
       data: responseData
@@ -1089,7 +996,6 @@ export const updateMovie = async (req, res) => {
       categories,
       status,
       
-      // New fields
       contentType,
       seriesId,
       seasonNumber,
@@ -1106,7 +1012,6 @@ export const updateMovie = async (req, res) => {
       });
     }
 
-    // Check authorization
     if (req.user.role !== "admin" && movie.filmmakerId !== req.user.id) {
       return res.status(403).json({
         success: false,
@@ -1114,11 +1019,10 @@ export const updateMovie = async (req, res) => {
       });
     }
 
-    // Update fields
     const updateData = {};
     if (title) updateData.title = title;
     if (description) updateData.description = description;
-    if (overview) updateData.description = overview; // Map overview to description
+    if (overview) updateData.description = overview;
     if (viewPrice !== undefined) updateData.viewPrice = parseFloat(viewPrice);
     if (downloadPrice !== undefined) updateData.downloadPrice = parseFloat(downloadPrice);
     if (currency) updateData.currency = currency;
@@ -1147,16 +1051,13 @@ export const updateMovie = async (req, res) => {
     if (episodeNumber !== undefined) updateData.episodeNumber = parseInt(episodeNumber);
     if (totalSeasons !== undefined) updateData.totalSeasons = parseInt(totalSeasons);
     
-    // Update legacy price field for backward compatibility
     if (viewPrice !== undefined) updateData.price = parseFloat(viewPrice);
 
     await movie.update(updateData);
 
-    // Update series episode count if episode moved to different series
     if (movie.contentType === "episode" && 
         (seriesId !== movie.seriesId || episodeNumber !== movie.episodeNumber)) {
       
-      // Update old series count
       if (movie.seriesId) {
         const oldEpisodeCount = await Movie.count({
           where: {
@@ -1172,7 +1073,6 @@ export const updateMovie = async (req, res) => {
         );
       }
       
-      // Update new series count
       if (seriesId) {
         const newEpisodeCount = await Movie.count({
           where: {
@@ -1204,7 +1104,7 @@ export const updateMovie = async (req, res) => {
   }
 };
 
-// 📌 Delete Movie (Admin or Filmmaker)
+// 📌 Delete Movie
 export const deleteMovie = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1218,7 +1118,6 @@ export const deleteMovie = async (req, res) => {
       });
     }
 
-    // Authorization: Only filmmaker or admin can delete
     if (req.user.role !== "admin" && movie.filmmakerId !== req.user.id) {
       return res.status(403).json({ 
         success: false,
@@ -1226,7 +1125,6 @@ export const deleteMovie = async (req, res) => {
       });
     }
 
-    // If deleting a series, check if it has episodes
     if (movie.contentType === "series") {
       const episodeCount = await Movie.count({
         where: {
@@ -1244,19 +1142,16 @@ export const deleteMovie = async (req, res) => {
       }
     }
 
-    // Delete associated files from B2
     if (movie.posterPublicId) {
       await deleteFromB2(movie.posterPublicId);
     }
     if (movie.backdropPublicId) {
       await deleteFromB2(movie.backdropPublicId);
     }
-    // Note: Video file deletion might need additional handling
     if (movie.videoPublicId) {
       await deleteFromB2(movie.videoPublicId);
     }
 
-    // Update series episode count if this is an episode
     const seriesId = movie.seriesId;
     
     await movie.destroy();
@@ -1317,7 +1212,6 @@ export const searchMovies = async (req, res) => {
       ]
     };
 
-    // Content type filter
     if (contentType) {
       where.contentType = contentType;
     } else if (excludeEpisodes === "true") {
@@ -1331,10 +1225,19 @@ export const searchMovies = async (req, res) => {
       limit: limitNum,
     });
 
+    const normalizedMovies = movies.map(movie => ({
+      ...movie.toJSON(),
+      poster: getBunnyCDNUrl(movie.poster),
+      backdrop: getBunnyCDNUrl(movie.backdrop),
+      streamingUrl: getBunnyCDNUrl(movie.streamingUrl),
+      videoUrl: getBunnyCDNUrl(movie.videoUrl),
+      hlsUrl: getBunnyCDNUrl(movie.hlsUrl),
+    }));
+
     res.status(200).json({
       success: true,
       query,
-      data: movies,
+      data: normalizedMovies,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -1378,7 +1281,6 @@ export const getFilmmakerMovies = async (req, res) => {
       limit: limitNum,
     });
 
-    // Group by content type
     const groupedByType = {
       movies: movies.filter(m => m.contentType === "movie"),
       series: movies.filter(m => m.contentType === "series"),
@@ -1614,7 +1516,6 @@ export const getMovieStats = async (req, res) => {
       group: ['status']
     });
 
-    // Get stats by content type
     const typeStats = await Movie.findAll({
       where: { filmmakerId },
       attributes: [
@@ -1667,7 +1568,6 @@ export const uploadMovieVideo = async (req, res) => {
       });
     }
 
-    // Validate URL format
     try {
       new URL(streamingUrl);
     } catch (err) {
@@ -1677,7 +1577,6 @@ export const uploadMovieVideo = async (req, res) => {
       });
     }
 
-    // Find movie
     let movie = await Movie.findByPk(movieId);
     if (!movie) {
       movie = await Movie.findOne({ where: { slug: movieId } });
@@ -1690,7 +1589,6 @@ export const uploadMovieVideo = async (req, res) => {
       });
     }
 
-    // Check authorization
     if (req.user.role !== "admin" && movie.filmmakerId !== req.user.id) {
       return res.status(403).json({ 
         success: false,
@@ -1698,7 +1596,6 @@ export const uploadMovieVideo = async (req, res) => {
       });
     }
 
-    // Update movie with video details
     await movie.update({
       streamingUrl,
       videoUrl: streamingUrl,
@@ -1717,9 +1614,9 @@ export const uploadMovieVideo = async (req, res) => {
         id: movie.id,
         title: movie.title,
         contentType: movie.contentType,
-        streamingUrl: movie.streamingUrl,
-        videoUrl: movie.videoUrl,
-        hlsUrl: movie.hlsUrl,
+        streamingUrl: getBunnyCDNUrl(movie.streamingUrl),
+        videoUrl: getBunnyCDNUrl(movie.videoUrl),
+        hlsUrl: getBunnyCDNUrl(movie.hlsUrl),
         duration: movie.videoDuration,
         quality: movie.videoQuality,
         processingStatus: movie.processingStatus,
@@ -1747,7 +1644,6 @@ export const uploadPoster = async (req, res) => {
 
     const { movieId } = req.params;
 
-    // Find movie
     let movie = await Movie.findByPk(movieId);
     if (!movie) {
       movie = await Movie.findOne({ where: { slug: movieId } });
@@ -1760,7 +1656,6 @@ export const uploadPoster = async (req, res) => {
       });
     }
 
-    // Check authorization
     if (req.user.role !== "admin" && movie.filmmakerId !== req.user.id) {
       return res.status(403).json({ 
         success: false,
@@ -1768,19 +1663,16 @@ export const uploadPoster = async (req, res) => {
       });
     }
 
-    // Delete old poster if exists
     if (movie.posterPublicId) {
       await deleteFromB2(movie.posterPublicId);
     }
 
-    // Upload new poster to B2
     const uploadResult = await uploadToB2(req.file.buffer, req.file.originalname, {
       folder: movie.contentType === "episode" ? "series/posters" : "movies/posters",
       resource_type: "image",
       mimeType: req.file.mimetype,
     });
 
-    // Update movie
     await movie.update({
       poster: uploadResult.secure_url,
       posterPublicId: uploadResult.public_id,
@@ -1790,7 +1682,7 @@ export const uploadPoster = async (req, res) => {
       success: true,
       message: "Poster uploaded successfully",
       data: {
-        posterUrl: movie.poster,
+        posterUrl: getBunnyCDNUrl(movie.poster),
       },
     });
   } catch (error) {
@@ -1815,7 +1707,6 @@ export const uploadBackdrop = async (req, res) => {
 
     const { movieId } = req.params;
 
-    // Find movie
     let movie = await Movie.findByPk(movieId);
     if (!movie) {
       movie = await Movie.findOne({ where: { slug: movieId } });
@@ -1828,7 +1719,6 @@ export const uploadBackdrop = async (req, res) => {
       });
     }
 
-    // Check authorization
     if (req.user.role !== "admin" && movie.filmmakerId !== req.user.id) {
       return res.status(403).json({ 
         success: false,
@@ -1836,19 +1726,16 @@ export const uploadBackdrop = async (req, res) => {
       });
     }
 
-    // Delete old backdrop if exists
     if (movie.backdropPublicId) {
       await deleteFromB2(movie.backdropPublicId);
     }
 
-    // Upload new backdrop to B2
     const uploadResult = await uploadToB2(req.file.buffer, req.file.originalname, {
       folder: movie.contentType === "episode" ? "series/backdrops" : "movies/backdrops",
       resource_type: "image",
       mimeType: req.file.mimetype,
     });
 
-    // Update movie
     await movie.update({
       backdrop: uploadResult.secure_url,
       backdropPublicId: uploadResult.public_id,
@@ -1858,7 +1745,7 @@ export const uploadBackdrop = async (req, res) => {
       success: true,
       message: "Backdrop uploaded successfully",
       data: {
-        backdropUrl: movie.backdrop,
+        backdropUrl: getBunnyCDNUrl(movie.backdrop),
       },
     });
   } catch (error) {
@@ -1871,155 +1758,6 @@ export const uploadBackdrop = async (req, res) => {
   }
 };
 
-// 📌 Get Streaming URLs
-export const getStreamingUrls = async (req, res) => {
-  try {
-    const { movieId } = req.params;
-    const userId = req.user?.id;
-
-    let movie = await Movie.findByPk(movieId);
-    if (!movie) {
-      movie = await Movie.findOne({ where: { slug: movieId } });
-    }
-
-    if (!movie) {
-      return res.status(404).json({ 
-        success: false,
-        message: "Content not found" 
-      });
-    }
-
-    // Check access
-    let hasAccess = false;
-    if (userId) {
-      // Check individual access
-      const individualAccess = await UserAccess.findOne({
-        where: {
-          userId,
-          movieId: movie.id,
-          status: "active",
-          [Op.or]: [
-            { expiresAt: null },
-            { expiresAt: { [Op.gt]: new Date() } }
-          ]
-        },
-      });
-
-      // Check series access for episodes
-      if (!individualAccess && movie.contentType === "episode" && movie.seriesId) {
-        const seriesAccess = await UserAccess.findOne({
-          where: {
-            userId,
-            seriesId: movie.seriesId,
-            status: "active",
-            expiresAt: { [Op.gt]: new Date() }
-          },
-        });
-        
-        if (seriesAccess) hasAccess = true;
-      } else if (individualAccess) {
-        hasAccess = true;
-      }
-
-      // Check if user is filmmaker
-      if (!hasAccess && movie.filmmakerId === userId) {
-        hasAccess = true;
-      }
-    }
-
-    // Check if content is free
-    if (!hasAccess && movie.viewPrice === 0) {
-      hasAccess = true;
-    }
-
-    if (!hasAccess) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied. Purchase required.",
-        data: {
-          contentId: movie.id,
-          title: movie.title,
-          contentType: movie.contentType,
-          price: movie.viewPrice,
-          requiresPurchase: true,
-        },
-      });
-    }
-
-    if (!movie.hlsUrl && !movie.streamingUrl) {
-      return res.status(400).json({ 
-        success: false,
-        message: "Content video not uploaded yet" 
-      });
-    }
-
-    // Increment view count
-    movie.totalViews = (movie.totalViews || 0) + 1;
-    await movie.save();
-
-    // Get episode info if applicable
-    let episodeInfo = {};
-    if (movie.contentType === "episode" && movie.seriesId) {
-      const series = await Movie.findByPk(movie.seriesId);
-      episodeInfo.series = {
-        id: series.id,
-        title: series.title,
-      };
-      
-      // Get next and previous episodes
-      const [nextEpisode, previousEpisode] = await Promise.all([
-        Movie.findOne({
-          where: {
-            seriesId: movie.seriesId,
-            seasonNumber: movie.seasonNumber,
-            episodeNumber: movie.episodeNumber + 1,
-            contentType: "episode",
-            status: "approved"
-          },
-          attributes: ['id', 'title', 'slug']
-        }),
-        Movie.findOne({
-          where: {
-            seriesId: movie.seriesId,
-            seasonNumber: movie.seasonNumber,
-            episodeNumber: movie.episodeNumber - 1,
-            contentType: "episode",
-            status: "approved"
-          },
-          attributes: ['id', 'title', 'slug']
-        })
-      ]);
-      
-      episodeInfo.nextEpisode = nextEpisode;
-      episodeInfo.previousEpisode = previousEpisode;
-    }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        movieId: movie.id,
-        title: movie.title,
-        contentType: movie.contentType,
-        duration: movie.videoDuration,
-        hlsUrl: movie.hlsUrl,
-        streamingUrl: movie.streamingUrl,
-        streamingUrls: {
-          default: movie.videoUrl,
-          hls: movie.hlsUrl,
-        },
-        thumbnail: movie.thumbnail,
-        ...episodeInfo
-      },
-    });
-  } catch (error) {
-    console.error("Error in getStreamingUrls:", error);
-    res.status(500).json({ 
-      success: false,
-      message: "Server error", 
-      error: error.message 
-    });
-  }
-};
 
 // 📌 Check Access for Content
 export const checkContentAccess = async (req, res) => {
@@ -2045,7 +1783,6 @@ export const checkContentAccess = async (req, res) => {
     let accessDetails = null;
 
     if (userId) {
-      // Check individual access
       const individualAccess = await UserAccess.findOne({
         where: {
           userId,
@@ -2065,7 +1802,6 @@ export const checkContentAccess = async (req, res) => {
         accessDetails = individualAccess;
       }
 
-      // Check series access for episodes
       if (!hasAccess && movie.contentType === "episode" && movie.seriesId) {
         const seriesAccess = await UserAccess.findOne({
           where: {
@@ -2084,20 +1820,17 @@ export const checkContentAccess = async (req, res) => {
         }
       }
 
-      // Check if user is filmmaker
       if (!hasAccess && movie.filmmakerId === userId) {
         hasAccess = true;
         accessType = "owner";
       }
     }
 
-    // Check if content is free
     if (!hasAccess && movie.viewPrice === 0) {
       hasAccess = true;
       accessType = "free";
     }
 
-    // Calculate days remaining if expiresAt exists
     let daysRemaining = null;
     if (expiresAt) {
       const now = new Date();
@@ -2159,7 +1892,6 @@ export const getUserPurchasedContent = async (req, res) => {
       ];
     }
 
-    // Get user access records
     const { count, rows: accessRecords } = await UserAccess.findAndCountAll({
       where,
       order: [['createdAt', 'DESC']],
@@ -2174,7 +1906,6 @@ export const getUserPurchasedContent = async (req, res) => {
       }]
     });
 
-    // Group by content type and series
     const groupedContent = {
       movies: [],
       series: [],
@@ -2207,7 +1938,6 @@ export const getUserPurchasedContent = async (req, res) => {
       }
     });
 
-    // Calculate summary
     const totalSpent = await UserAccess.sum('pricePaid', { where: { userId, status: 'active' } });
     const activeAccessCount = await UserAccess.count({
       where: {
@@ -2256,47 +1986,58 @@ export const addRatingMovies = async (req, res) => {
     const { movieId } = req.params;
     const { rating } = req.body;
     const userId = req.user.id; 
+    
     if (!rating || rating < 1 || rating > 5) {
       return res.status(400).json({
         success: false,
         message: "Rating must be between 1 and 5",
       });
     }
+    
     let movie = await Movie.findByPk(movieId);
     if (!movie) {
       movie = await Movie.findOne({ where: { slug: movieId } });
     }
+    
     if (!movie) {
       return res.status(404).json({
         success: false,
         message: "Content not found",
       });
     } 
+    
+    // Note: You need to import MovieRating model
+    // import MovieRating from "../models/MovieRating.model.js";
+    
     let existingRating = await MovieRating.findOne({
       where: {
         userId,
         movieId: movie.id
       }
     });
+    
     if (existingRating) {
       existingRating.rating = rating;
       await existingRating.save();
-    }
-    else {
+    } else {
       existingRating = await MovieRating.create({
         userId,
         movieId: movie.id,
         rating
       });
     }
+    
     const ratings = await MovieRating.findAll({
       where: { movieId: movie.id }
     });
+    
     const totalRatings = ratings.length;
     const avgRating = ratings.reduce((sum, r) => sum + r.rating, 0) / totalRatings;
+    
     movie.avgRating = parseFloat(avgRating.toFixed(2));
     movie.totalReviews = totalRatings;
     await movie.save();
+    
     res.status(200).json({
       success: true,
       data: {
@@ -2307,8 +2048,7 @@ export const addRatingMovies = async (req, res) => {
         rating: existingRating.rating
       }
     });
-  }
-  catch (error) {
+  } catch (error) {
     console.error("Error in addRatingMovies:", error);
     res.status(500).json({
       success: false,
@@ -2316,4 +2056,486 @@ export const addRatingMovies = async (req, res) => {
       error: error.message,
     });
   }
+};
+
+export const shareMovieLink = async (req, res) => {
+  try {
+    const { movieId, platform, movieTitle, userId } = req.body;
+    
+    const authenticatedUserId = req.user?.id;
+    const finalUserId = authenticatedUserId || userId;
+    
+    if (!finalUserId) {
+      return res.status(401).json({
+        success: false,
+        message: "User ID is required. Please log in or provide userId in request body.",
+      });
+    }
+
+    const ipAddress = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    const userAgent = req.headers['user-agent'];
+    
+    if (!movieId || !platform) {
+      return res.status(400).json({
+        success: false,
+        message: "Movie ID and platform are required",
+      });
+    }
+
+    let cleanMovieId = String(movieId).trim();
+    if (cleanMovieId.startsWith('"') && cleanMovieId.endsWith('"')) {
+      cleanMovieId = cleanMovieId.slice(1, -1);
+    }
+    if (cleanMovieId.startsWith("'") && cleanMovieId.endsWith("'")) {
+      cleanMovieId = cleanMovieId.slice(1, -1);
+    }
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(cleanMovieId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid movieId format",
+      });
+    }
+
+    const movie = await Movie.findByPk(cleanMovieId);
+    if (!movie) {
+      return res.status(404).json({
+        success: false,
+        message: "Content not found",
+      });
+    }
+
+    const shareLink = `${process.env.FRONTEND_URL}/movie/${movie.id}`;
+    
+    let deviceType = 'unknown';
+    if (userAgent) {
+      if (/mobile/i.test(userAgent)) deviceType = 'mobile';
+      else if (/tablet/i.test(userAgent)) deviceType = 'tablet';
+      else if (/desktop/i.test(userAgent)) deviceType = 'desktop';
+    }
+    
+    const share = await Share.create({
+      movieId: cleanMovieId,
+      userId: finalUserId,
+      platform,
+      shareLink,
+      movieTitle: movieTitle || movie.title,
+      ipAddress,
+      userAgent,
+      deviceType,
+      metadata: {
+        userAgent,
+        referer: req.headers.referer || null,
+        language: req.headers['accept-language'] || null,
+        isAuthenticated: !!authenticatedUserId
+      }
+    });
+
+    await Movie.increment('shareCount', {
+      by: 1,
+      where: { id: cleanMovieId }
+    });
+
+    if (authenticatedUserId) {
+      try {
+        await User.increment('points', {
+          by: 5,
+          where: { id: authenticatedUserId }
+        });
+      } catch (pointsError) {
+        console.warn("Could not award points:", pointsError.message);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        shareId: share.id,
+        shareLink,
+        movieTitle: movie.title,
+        pointsAwarded: authenticatedUserId ? 5 : 0,
+        message: "Share recorded successfully"
+      }
+    });
+  } catch (error) {
+    console.error("Error in shareMovie:", error);
+    
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(200).json({
+        success: true,
+        message: "Share already recorded",
+        data: {
+          shareLink: `${process.env.FRONTEND_URL}/movie/${req.body.movieId}`,
+          alreadyShared: true
+        }
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+
+
+
+export const addMovieReview = async (req, res) => {
+  try {
+    const { movieId } = req.params;
+    const { review, content, rating } = req.body; // Expecting review, content, and rating
+    const userId = req.user.id;
+
+    // Validate required fields
+    if (!review || !review.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Review title is required",
+      });
+    }
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Review content is required",
+      });
+    }
+
+    if (!rating) {
+      return res.status(400).json({
+        success: false,
+        message: "Rating is required",
+      });
+    }
+
+    // Validate rating range (1-10 as per your model)
+    if (rating < 1 || rating > 10) {
+      return res.status(400).json({
+        success: false,
+        message: "Rating must be between 1 and 10",
+      });
+    }
+
+    // Validate lengths
+    if (review.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Review title must be less than 100 characters",
+      });
+    }
+
+    if (content.length > 1000) {
+      return res.status(400).json({
+        success: false,
+        message: "Review content must be less than 1000 characters",
+      });
+    }
+
+    // Find the movie
+    const movie = await Movie.findByPk(movieId);
+    if (!movie) {
+      return res.status(404).json({
+        success: false,
+        message: "Movie not found",
+      });
+    }
+
+    // Check if user already reviewed this movie
+    const existingReview = await Review.findOne({
+      where: {
+        userId,
+        movieId
+      }
+    });
+
+    let reviewData;
+    if (existingReview) {
+      // Update existing review
+      existingReview.rating = rating;
+      existingReview.comment = content; // Store content in comment field
+      await existingReview.save();
+      reviewData = existingReview;
+    } else {
+      // Create new review - store review (title) and content in comment field
+      // Note: Your model has only rating and comment fields
+      // You can store both title and content in comment field as JSON or combined
+      const fullComment = JSON.stringify({
+        title: review,
+        content: content
+      });
+      
+      reviewData = await Review.create({
+        userId,
+        movieId,
+        rating,
+        comment: fullComment
+      });
+    }
+
+    // Get user info for response
+    const user = await User.findByPk(userId, {
+      attributes: ['id', 'name', 'email', 'profilePicture']
+    });
+
+    // Update movie average rating (optional)
+    await updateMovieAverageRating(movieId);
+
+    res.status(200).json({
+      success: true,
+      message: existingReview ? "Review updated successfully" : "Review added successfully",
+      data: {
+        review: {
+          id: reviewData.id,
+          movieId: reviewData.movieId,
+          userId: reviewData.userId,
+          rating: reviewData.rating,
+          comment: reviewData.comment,
+          createdAt: reviewData.createdAt,
+          updatedAt: reviewData.updatedAt,
+          user: {
+            id: user.id,
+            name: user.name,
+            profilePicture: user.profilePicture
+          }
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Error in addMovieReview:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+// Helper function to update movie average rating
+async function updateMovieAverageRating(movieId) {
+  try {
+    const result = await Review.findOne({
+      where: { movieId },
+      attributes: [
+        [sequelize.fn('AVG', sequelize.col('rating')), 'averageRating'],
+        [sequelize.fn('COUNT', sequelize.col('id')), 'totalReviews']
+      ],
+      raw: true
+    });
+
+    if (result) {
+      const averageRating = parseFloat(result.averageRating).toFixed(1) || 0;
+      await Movie.update(
+        {
+          vote_average: averageRating,
+          vote_count: result.totalReviews || 0
+        },
+        { where: { id: movieId } }
+      );
+    }
+  } catch (error) {
+    console.error("Error updating movie average rating:", error);
+  }
+}
+
+// Get movie reviews
+export const getMovieReviews = async (req, res) => {
+  try {
+    const { movieId } = req.params;
+    const { page = 1, limit = 10, sort = 'newest' } = req.query;
+
+    const movie = await Movie.findByPk(movieId);
+    if (!movie) {
+      return res.status(404).json({
+        success: false,
+        message: "Movie not found",
+      });
+    }
+
+    const offset = (page - 1) * limit;
+    
+    // Determine sort order
+    let order;
+    switch(sort) {
+      case 'highest':
+        order = [['rating', 'DESC'], ['createdAt', 'DESC']];
+        break;
+      case 'lowest':
+        order = [['rating', 'ASC'], ['createdAt', 'DESC']];
+        break;
+      case 'oldest':
+        order = [['createdAt', 'ASC']];
+        break;
+      default: // 'newest'
+        order = [['createdAt', 'DESC']];
+    }
+
+    const { count, rows: reviews } = await Review.findAndCountAll({
+      where: { movieId },
+      include: [
+        {
+          model: User,
+          attributes: ['id', 'name', 'email', 'profilePicture', 'createdAt']
+        }
+      ],
+      order,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+
+    // Parse comment JSON to extract title and content
+    const parsedReviews = reviews.map(review => {
+      let reviewTitle = '';
+      let reviewContent = '';
+      
+      try {
+        const parsedComment = JSON.parse(review.comment);
+        reviewTitle = parsedComment.title || '';
+        reviewContent = parsedComment.content || review.comment;
+      } catch (e) {
+        // If not JSON, use the whole comment as content
+        reviewContent = review.comment;
+      }
+
+      return {
+        id: review.id,
+        rating: review.rating,
+        title: reviewTitle,
+        content: reviewContent,
+        createdAt: review.createdAt,
+        user: {
+          id: review.User?.id,
+          name: review.User?.name,
+          profilePicture: review.User?.profilePicture,
+          memberSince: review.User?.createdAt
+        }
+      };
+    });
+
+    // Calculate average rating
+    const averageResult = await Review.findOne({
+      where: { movieId },
+      attributes: [
+        [sequelize.fn('AVG', sequelize.col('rating')), 'averageRating'],
+        [sequelize.fn('COUNT', sequelize.col('id')), 'totalReviews']
+      ],
+      raw: true
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        reviews: parsedReviews,
+        summary: {
+          averageRating: averageResult?.averageRating ? parseFloat(averageResult.averageRating).toFixed(1) : 0,
+          totalReviews: averageResult?.totalReviews || 0
+        },
+        pagination: {
+          total: count,
+          page: parseInt(page),
+          pages: Math.ceil(count / limit),
+          limit: parseInt(limit)
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Error in getMovieReviews:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+// Get user's review for a movie
+export const getMovieReview = async (req, res) => {
+  try {
+    const { movieId } = req.params;
+    const userId = req.user.id;
+
+    const movie = await Movie.findByPk(movieId);
+    if (!movie) {
+      return res.status(404).json({
+        success: false,
+        message: "Movie not found",
+      });
+    }
+
+    const review = await Review.findOne({
+      where: {
+        userId,
+        movieId
+      }
+    });
+
+    if (!review) {
+      return res.status(200).json({
+        success: true,
+        data: null,
+        message: "No review found for this movie"
+      });
+    }
+
+    // Parse comment JSON
+    let reviewTitle = '';
+    let reviewContent = '';
+    
+    try {
+      const parsedComment = JSON.parse(review.comment);
+      reviewTitle = parsedComment.title || '';
+      reviewContent = parsedComment.content || review.comment;
+    } catch (e) {
+      reviewContent = review.comment;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        id: review.id,
+        rating: review.rating,
+        title: reviewTitle,
+        content: reviewContent,
+        createdAt: review.createdAt,
+        updatedAt: review.updatedAt
+      }
+    });
+  } catch (error) {
+    console.error("Error in getUserMovieReview:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+
+// Export all functions
+export default {
+  addMovie,
+  getAllMovies,
+  getFilmmakerSeries,
+  getMovieById,
+  updateMovie,
+  deleteMovie,
+  searchMovies,
+  getFilmmakerMovies,
+  getTrendingMovies,
+  getTopRatedMovies,
+  getMoviesByCategory,
+  getMovieCategories,
+  getRecentMovies,
+  getMovieStats,
+  uploadMovieVideo,
+  uploadPoster,
+  uploadBackdrop,
+  checkContentAccess,
+  getUserPurchasedContent,
+  addRatingMovies,
+  shareMovieLink,
+  addMovieReview,
+  getMovieReview,
 };

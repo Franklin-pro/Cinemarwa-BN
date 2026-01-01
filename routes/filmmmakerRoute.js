@@ -130,7 +130,7 @@ router.get(
   "/withdrawals",
   authenticateToken,
   requireFilmmaker,
-  getAllWithdrawals
+ getWithdrawalHistory
 );
 
 // ====== MOVIE MANAGEMENT ======

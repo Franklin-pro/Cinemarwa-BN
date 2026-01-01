@@ -69,6 +69,10 @@ const Movie = sequelize.define(
       type: DataTypes.INTEGER,
       defaultValue: 0,
     },
+    shareCount:{
+      type:DataTypes.INTEGER,
+      defaultValue:0
+    },
 
     // ======= PRICING =======
     price: {
@@ -97,7 +101,7 @@ const Movie = sequelize.define(
     },
     currency: {
       type: DataTypes.STRING,
-      defaultValue: "USD",
+      defaultValue: "RWF",
     },
 
     // ======= ROYALTY & REVENUE =======
@@ -160,6 +164,14 @@ const Movie = sequelize.define(
     isFeatured: {
       type: DataTypes.BOOLEAN,
       defaultValue: false,
+    },
+    site:{
+      type: DataTypes.STRING,
+      defaultValue: "youtube",
+    },
+    youtubeTrailerLink:{
+      type: DataTypes.STRING,
+      defaultValue: "",
     },
     isTrending: {
       type: DataTypes.BOOLEAN,

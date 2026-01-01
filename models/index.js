@@ -3,6 +3,7 @@ import User from './User.modal.js';
 import Movie from './Movie.model.js';
 import Review from './Review.model.js';
 import Payment from './Payment.model.js';
+import Withdrawal from './withdrawal.js';
 import OTP from './OTP.modal.js';
 
 // ===== DEFINE RELATIONSHIPS =====
@@ -59,6 +60,19 @@ Payment.belongsTo(User, {
     as: 'user'
 });
 
+// 5. USER -> WITHDRAWAL (One-to-Many)
+// A user can have many withdrawals
+User.hasMany(Withdrawal, {
+    foreignKey: 'userId',
+    as: 'withdrawals',
+    onDelete: 'CASCADE'
+});
+
+Withdrawal.belongsTo(User, {
+    foreignKey: 'userId',
+    as: 'user'
+});
+
 // 5. MOVIE -> PAYMENT (One-to-Many)
 // A movie can have many payments (from multiple users)
 Movie.hasMany(Payment, {
@@ -70,6 +84,19 @@ Movie.hasMany(Payment, {
 Payment.belongsTo(Movie, {
     foreignKey: 'movieId',
     as: 'movie'
+});
+
+// Payment -> Withdrawal (One-to-Many)
+// A payment can have many withdrawals (automatic payouts, admin fee records)
+Payment.hasMany(Withdrawal, {
+    foreignKey: 'paymentId',
+    as: 'withdrawals',
+    onDelete: 'SET NULL'
+});
+
+Withdrawal.belongsTo(Payment, {
+    foreignKey: 'paymentId',
+    as: 'payment'
 });
 
 // 6. APPROVED_BY relationship (Self-referencing for User)
@@ -168,12 +195,43 @@ Movie.prototype.updateRevenue = async function(amount) {
     await this.increment('totalRevenue', { by: amount });
 };
 
+// Ensure DB enum for withdrawals includes required values (safety for existing databases)
+(async function ensureWithdrawalEnums() {
+    // Ensure status enum has 'rejected'
+    try {
+        const [statusRows] = await sequelize.query("SELECT enumlabel FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = 'enum_withdrawals_status'");
+        const statusLabels = statusRows.map(r => r.enumlabel);
+        if (!statusLabels.includes('rejected')) {
+            await sequelize.query("ALTER TYPE enum_withdrawals_status ADD VALUE 'rejected'", { raw: true });
+            console.log("✅ Added 'rejected' value to enum_withdrawals_status");
+        }
+    } catch (err) {
+        console.warn("⚠️ Could not ensure 'rejected' in enum_withdrawals_status:", err.message);
+    }
+
+    // Ensure type enum contains all expected types
+    try {
+        const expectedTypes = ['filmmaker_earning', 'admin_fee', 'manual_withdrawal', 'automatic_payout', 'subscription_admin_fee', 'series_access_admin_fee'];
+        const [typeRows] = await sequelize.query("SELECT enumlabel FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = 'enum_withdrawals_type'");
+        const typeLabels = typeRows.map(r => r.enumlabel);
+        for (const t of expectedTypes) {
+            if (!typeLabels.includes(t)) {
+                await sequelize.query(`ALTER TYPE enum_withdrawals_type ADD VALUE '${t}'`, { raw: true });
+                console.log(`✅ Added '${t}' to enum_withdrawals_type`);
+            }
+        }
+    } catch (err) {
+        console.warn("⚠️ Could not ensure values in enum_withdrawals_type:", err.message);
+    }
+})();
+
 // ===== MODEL EXPORTS =====
 export {
     User,
     Movie,
     Review,
     Payment,
+    Withdrawal,
     OTP,
     sequelize
 };
@@ -183,6 +241,7 @@ export default {
     Movie,
     Review,
     Payment,
+    Withdrawal,
     OTP,
     sequelize
 };

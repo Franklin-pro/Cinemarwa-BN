@@ -13,13 +13,15 @@ import {
   uploadPoster,
   uploadBackdrop,
   // uploadSubtitle,
-  getStreamingUrls,
   getMovieCategories,
   getAllMovies,
   getFilmmakerSeries,
   addRatingMovies,
+  shareMovieLink,
+  getMovieReview,
+  addMovieReview,
 } from "../controllers/movieController.js";
-import { authenticateToken, requireAdmin, optionalAuthenticate } from "../middleware/authMiddleware.js";
+import { authenticateToken, optionalAuthenticate } from "../middleware/authMiddleware.js";
 import {
   uploadVideoMiddleware,
   uploadImageMiddleware,
@@ -52,9 +54,14 @@ router.get("/categories", getMovieCategories);
 // Get movies by filmmaker
 router.get("/filmmaker/:filmamakerId", getFilmmakerMovies);
 router.get("/filmmaker/:filmmakerId/series", getFilmmakerSeries);
+router.get("/:id/reviews",authenticateToken, getMovieReview);
+
 // Get movie by ID or slug (must be last)
 // `optionalAuthenticate` will attach `req.user` when a valid token is sent.
 router.get("/:id", optionalAuthenticate, getMovieById);
+router.post("/share",optionalAuthenticate, shareMovieLink)
+router.post("/rating", optionalAuthenticate, addRatingMovies);
+router.post("/:movieId/add-review", authenticateToken, addMovieReview);
 
 // ====== PROTECTED ROUTES ======
 
@@ -109,6 +116,6 @@ router.post(
 // ====== STREAMING ROUTES ======
 
 // Get streaming URLs for a movie (public)
-router.get("/:movieId/streaming", getStreamingUrls);
+// router.get("/:movieId/streaming", getStreamingUrls);
 
 export default router;

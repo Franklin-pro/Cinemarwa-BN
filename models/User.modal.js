@@ -150,6 +150,10 @@ const User = sequelize.define('User', {
         type: DataTypes.BOOLEAN,
         defaultValue: false
     },
+    status: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: true
+    },
     blockedReason: DataTypes.TEXT,
     blockedAt: DataTypes.DATE,
     blockedBy: DataTypes.UUID,

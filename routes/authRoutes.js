@@ -11,7 +11,8 @@ import {
     getActiveDevices,
     removeDevice,
     loginWithGoogle,
-    getProfileUser
+    getProfileUser,
+    updateProfileUser
 } from "../controllers/authController.js";
 import { authenticateToken, requireUpgrade } from "../middleware/authMiddleware.js";
 import passport from "passport";
@@ -37,5 +38,6 @@ router.get(
 );
 router.delete("/devices/:deviceId", authenticateToken, removeDevice);
 router.patch("/upgrade/:userId", authenticateToken, requireUpgrade, upgradeUser);
+router.put("/update-profile", authenticateToken, updateProfileUser);
 
 export default router;

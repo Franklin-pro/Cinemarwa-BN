@@ -871,7 +871,7 @@ export const getAllUsers = async (req, res) => {
       order: [['createdAt', 'DESC']],
       offset: skip,
       limit: limitNum,
-      attributes: ['name', 'email', 'role', 'isBlocked', 'approvalStatus', 'createdAt', 'filmmmakerStatsTotalMovies', 'filmmmakerStatsTotalRevenue']
+      attributes: ['id','name', 'email', 'role', 'isBlocked','status', 'approvalStatus', 'createdAt', 'filmmmakerStatsTotalMovies', 'filmmmakerStatsTotalRevenue']
     });
 
     const total = await User.count({ where });

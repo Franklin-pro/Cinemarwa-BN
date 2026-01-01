@@ -146,7 +146,6 @@ export const requestToPay = async (amount, phoneNumber, userId, description, cur
           "Accept": "application/json",
         },
         validateStatus: (status) => status < 500,
-        timeout: 30000, // 30 second timeout
       }
     );
 

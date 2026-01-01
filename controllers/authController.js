@@ -473,6 +473,15 @@ const generateDeviceId = (req) => {
 
 // Get User Profile/Information
 export const getProfileUser = async (req, res) => {
+
+    const formatEmail = 
+    (email) => {
+            const [username, domain] = email.split('@');
+            const formattedUsername = username.length > 2
+                ? `${username[0]}${'*'.repeat(username.length - 2)}${username[username.length - 1]}`
+                : username;
+            return `${formattedUsername}@${domain}`;
+        };
     try {
         const user = await User.findByPk(req.userId, {
             attributes: [
@@ -498,7 +507,10 @@ export const getProfileUser = async (req, res) => {
         res.status(200).json({
             id: user.id,
             name: user.name,
-            email: user.email,
+            email: 
+                user.email.length > 2
+                    ? formatEmail(user.email)
+                    : user.email,
             role: user.role,
             isUpgraded: user.isUpgraded,
             isSubscribed: user.isSubscribed || false,
@@ -515,5 +527,51 @@ export const getProfileUser = async (req, res) => {
             error: error.message,
             stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
         });
+    }
+};
+
+export const updateProfileUser = async (req, res) => {
+    try {
+        const { name} = req.body;
+        const user = await User.findByPk(req.userId);
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        user.name = name;
+        await user.save();
+
+        res.status(200).json({
+            message: "Profile updated successfully",
+            user: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                isUpgraded: user.isUpgraded,
+                maxDevices: user.maxDevices
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ message: "Server error", error: error.message });
+    }
+};
+
+export const getUserNotifications = async (req, res) => {
+    try {
+        const user = await User.findByPk(req.userId);
+
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        const notifications = user.notifications || [];
+
+        res.status(200).json({
+            notifications: notifications
+        });
+    } catch (error) {
+        res.status(500).json({ message: "Server error", error: error.message });
     }
 };

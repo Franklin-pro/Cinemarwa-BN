@@ -1,6 +1,7 @@
 import User from "../models/User.modal.js";
 import Movie from "../models/Movie.model.js";
 import Payment from "../models/Payment.model.js";
+import { clearUrl } from "../utils/backblazeB2.js";
 import Joi from "joi";
 import { Op } from "sequelize";
 
@@ -136,8 +137,6 @@ export const updateFilmmmakerProfile = async (req, res) => {
     });
   }
 };
-
-// ====== FILMMAKER ANALYTICS DASHBOARD ======
 
 // ====== FILMMAKER ANALYTICS DASHBOARD ======
 
@@ -1056,8 +1055,6 @@ export const getWithdrawalHistory = async (req, res) => {
     // Get withdrawal history from user document
     const withdrawalHistory = filmmaker.filmmmakerFinanceWithdrawalHistory || [];
     
-    console.log("Raw withdrawal history:", JSON.stringify(withdrawalHistory, null, 2)); // Debug log
-    
     // Calculate totals
     let totalWithdrawn = 0;
     let pendingWithdrawals = 0;
@@ -1261,8 +1258,8 @@ export const getFilmmmakerMovies = async (req, res) => {
         slug: item.slug,
         description: item.description || item.overview,
         overview: item.overview || item.description,
-        poster: item.poster,
-        backdrop: item.backdrop,
+        poster: clearUrl(item.poster),
+        backdrop: clearUrl(item.backdrop),
         status: item.status,
         totalViews: safeParseNumber(item.totalViews),
         videoDuration: safeParseNumber(item.videoDuration),
