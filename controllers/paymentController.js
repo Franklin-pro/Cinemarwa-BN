@@ -8,6 +8,8 @@ import jwt from "jsonwebtoken";
 import Joi from "joi";
 import Withdrawal from "../models/withdrawal.js";
 import { calculateExpiryDate, getAccessPeriodLabel } from "../utils/dateUtils.js";
+import { sendPaymentConfirmation } from "../utils/subscribeEmail.js";
+import { clearUrl } from "../utils/backblazeB2.js";
 
 // ====== PAYMENT DISTRIBUTION CONFIGURATION ======
 const FILMMAKER_SHARE = parseFloat(process.env.FILMMAKER_SHARE_PERCENTAGE) || 70;
@@ -231,92 +233,6 @@ const sanitizeDescription = (description) => {
 // ====== CORE PAYMENT FUNCTIONS ======
 
 /**
- * 🔥 GRANT MOVIE ACCESS - FIXED VERSION (No string concatenation)
- */
-const grantMovieAccess = async (payment) => {
-  try {
-    console.log("🎬 GRANTING MOVIE ACCESS FOR PAYMENT:", {
-      id: payment.id,
-      type: payment.type,
-      userId: payment.userId,
-      movieId: payment.movieId
-    });
-    
-    const user = await User.findByPk(payment.userId);
-    const movie = await Movie.findByPk(payment.movieId);
-
-    if (!user || !movie) {
-      throw new Error('User or content not found');
-    }
-
-    // Handle series access
-    if (payment.type === 'series_access') {
-      console.log("📺 Handling series access");
-      return await grantSeriesAccess(payment, user);
-    }
-
-    // Calculate expiry date based on access period
-    let expiresAt = null;
-    let accessType = 'view';
-
-    // 🔥 CRITICAL FIX: Check payment.type correctly
-    if (payment.type === 'movie_watch' || payment.type === 'watch') {
-      expiresAt = new Date();
-      expiresAt.setHours(expiresAt.getHours() + 48);
-      accessType = 'view';
-
-      user.watchlist = user.watchlist || [];
-      user.watchlist.push({
-        movie: movie.id,
-        grantedAt: new Date(),
-        expiresAt: expiresAt,
-        transactionId: payment.id,
-      });
-    } else if (payment.type === 'movie_download' || payment.type === 'download') {
-      accessType = 'download';
-
-      user.downloads = user.downloads || [];
-      user.downloads.push({
-        movie: movie.id,
-        grantedAt: new Date(),
-        transactionId: payment.id,
-      });
-    }
-
-    await user.save();
-
-    // 🔥 CREATE UserAccess RECORD
-    await UserAccess.create({
-      userId: payment.userId,
-      movieId: payment.movieId,
-      accessType: accessType,
-      accessPeriod: payment.accessPeriod || 'one-time',
-      pricePaid: safeParseNumber(payment.amount) || 0,
-      currency: payment.currency || 'RWF',
-      expiresAt: expiresAt,
-      paymentId: payment.id,
-      status: 'active'
-    });
-
-    // 🔥 CRITICAL FIX: Update movie revenue CORRECTLY (numeric addition)
-    const currentRevenue = safeParseNumber(movie.totalRevenue);
-    const paymentAmount = safeParseNumber(payment.amount);
-    const newRevenue = currentRevenue + paymentAmount;
-    
-    await movie.update({ 
-      totalRevenue: newRevenue,
-      totalViews: (movie.totalViews || 0) + 1
-    });
-
-    console.log("✅ Movie access granted successfully");
-    return { success: true };
-  } catch (error) {
-    console.error('❌ Error granting access:', error);
-    throw error;
-  }
-};
-
-/**
  * 🔥 GRANT SERIES ACCESS - FIXED VERSION
  */
 const grantSeriesAccess = async (payment, user) => {
@@ -535,79 +451,6 @@ const updateFilmmakerRevenue = async (payment) => {
 
   } catch (error) {
     console.error('❌ Error updating filmmaker revenue:', error);
-  }
-};
-
-/**
- * 🔥 PROCESS ADMIN PAYOUT ONLY
- */
-const processAdminPayout = async (payment, movie) => {
-  try {
-    console.log("🏦 PROCESSING ADMIN PAYOUT FOR PAYMENT:", payment.id);
-
-    const distribution = calculatePaymentDistribution(payment.amount, payment.type);
-
-    if (distribution.adminAmount > 0) {
-      
-      const adminPayout = await sendMoneyToRecipient(
-        distribution.adminAmount,
-        ADMIN_MOMO_NUMBER,
-        `admin_${payment.id}`,
-        sanitizeDescription(`Platform Fee ${payment.type} ${movie?.title || 'Content'}`)
-      );
-
-      if (adminPayout.success) {
-        
-        await Withdrawal.create({
-          userId: payment.userId,
-          amount: distribution.adminAmount,
-          currency: payment.currency || 'RWF',
-          phoneNumber: ADMIN_MOMO_NUMBER,
-          status: 'completed',
-          type: payment.type.includes('subscription') || payment.type === 'series_access' 
-            ? 'subscription_admin_fee' 
-            : 'admin_fee',
-          description: sanitizeDescription(`Platform Fee ${payment.type} ${movie?.title || 'Content'}`),
-          referenceId: adminPayout.referenceId,
-          transactionId: adminPayout.data?.transaction_id,
-          completedAt: new Date(),
-          metadata: {
-            movieId: movie?.id,
-            movieTitle: movie?.title,
-            paymentType: payment.type,
-            customerPaymentId: payment.id,
-            filmmakerId: payment.filmmakerId,
-            contentType: movie?.contentType,
-            seriesId: movie?.seriesId,
-          },
-        });
-        
-        console.log("✅ Admin payout completed");
-        return {
-          success: true,
-          admin: {
-            amount: distribution.adminAmount,
-            referenceId: adminPayout.referenceId,
-            status: 'completed'
-          }
-        };
-      } else {
-        console.error("❌ Admin payout failed:", adminPayout.error);
-        return {
-          success: false,
-          error: adminPayout.error
-        };
-      }
-    } else {
-      console.log("ℹ️ No admin amount to payout");
-      return {
-        success: true,
-        message: 'No admin payout needed'
-      };
-    }
-  } catch (error) {
-    console.error('❌ Error processing admin payout:', error);
-    return { success: false, error: error.message };
   }
 };
 
@@ -878,25 +721,64 @@ export const payWithMoMo = async (req, res) => {
       let adminPayoutResults = null;
       let accessResults = null;
 
-      if (isGatewaySuccessful) {
-        try {
-          accessResults = await grantMovieAccess(newPayment);
-          
-          // 🔥 If payout numbers were sent to Lanari Pay, they handle the split automatically
-          // So we only need to update our database records
-          if (!type.includes('subscription') && type !== 'series_access') {
-            await updateFilmmakerRevenue(newPayment);
-          }
-          
-          // If payout numbers weren't sent (or failed), do manual admin payout
-          if (!payoutNumbers && distribution.adminAmount > 0) {
-            adminPayoutResults = await processAdminPayout(newPayment, movie);
-          }
-          
-        } catch (error) {
-          console.error("❌ Post-payment error:", error);
-        }
+// In payWithMoMo function, replace the email section:
+if (isGatewaySuccessful) {
+  try {
+    accessResults = await grantMovieAccess(newPayment);
+    
+    // 🔥 FIXED: Correct email parameters for movie payment
+    try {
+      const user = await User.findByPk(userId);
+      
+      if (user && user.email) {
+        // Get user's actual email (not filmmaker's email)
+        await sendPaymentConfirmation({
+          to: user.email, // Customer's email, not filmmaker's
+          userName: user.name || 'Valued Customer',
+          movieTitle: movie.title,
+          amount: parseFloat(finalAmount).toFixed(2),
+          paymentDate: new Date().toLocaleDateString('en-US', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          }),
+          transactionId: newPayment.id,
+          paymentMethod: 'Mobile Money',
+          moviePosterUrl:clearUrl(movie.poster)  || 'https://images.unsplash.com/photo-1489599809516-9827b6d1cf13?auto=format&fit=crop&w=600&q=80',
+          downloadLink: type.includes('download') || type === 'download' ? 
+            `${process.env.FRONTEND_URL || 'https://cinemarwa.com'}/download/${movieId}?token=${newPayment.id}` : 
+            null,
+          watchLink: type.includes('watch') || type === 'watch' ? 
+            `${process.env.FRONTEND_URL || 'https://cinemarwa.com'}/watch/${movieId}?token=${newPayment.id}` : 
+            null,
+          supportEmail: process.env.SUPPORT_EMAIL || 'support@cinemarwa.com'
+        });
+        
+        console.log(`✅ Payment confirmation email sent to ${user.email}`);
       }
+    } catch (emailError) {
+      console.error('❌ Failed to send payment email:', emailError);
+      // Don't throw - payment should still succeed even if email fails
+    }
+    
+    // 🔥 If payout numbers were sent to Lanari Pay, they handle the split automatically
+    // So we only need to update our database records
+    if (!type.includes('subscription') && type !== 'series_access') {
+      await updateFilmmakerRevenue(newPayment);
+    }
+    
+    // If payout numbers weren't sent (or failed), do manual admin payout
+    if (!payoutNumbers && distribution.adminAmount > 0) {
+      adminPayoutResults = await processAdminPayout(newPayment, movie);
+    }
+    
+  } catch (error) {
+    console.error("❌ Post-payment error:", error);
+  }
+}
 
       return res.status(200).json({
         success: true,
@@ -1155,50 +1037,83 @@ export const paySeriesWithMoMo = async (req, res) => {
       let adminPayoutResults = null;
       let accessResults = null;
 
-      if (isGatewaySuccessful) {
-        try {
-          accessResults = await grantSeriesAccess(newPayment);
-          
-          // 🔥 CRITICAL: Update filmmaker revenue for series payments (70%)
-          // Even if Lanari Pay handles payout automatically, we need to update our records
-          console.log("💰 Updating filmmaker revenue for series access...");
-          await updateFilmmakerRevenue(newPayment);
-          
-          // If payout numbers weren't sent (or failed), do manual admin payout
-          if (distribution.adminAmount > 0) {
-            // Check if Lanari Pay already handled the payout
-            if (!payoutNumbers) {
-              adminPayoutResults = await processAdminPayout(newPayment, series);
-            } else {
-              console.log("✅ Lanari Pay handled automatic 30% admin payout");
-              // Create a record of the automatic payout
-              await Withdrawal.create({
-                userId: userId,
-                amount: distribution.adminAmount,
-                currency: finalCurrency,
-                phoneNumber: ADMIN_MOMO_NUMBER,
-                status: 'completed',
-                type: 'series_access_admin_fee',
-                description: sanitizeDescription(`Series Access Admin Fee ${series.title} ${accessPeriod}`),
-                referenceId: payment.referenceId,
-                transactionId: payment.data?.gateway_response?.data?.transaction_id,
-                completedAt: new Date(),
-                metadata: {
-                  seriesId: series.id,
-                  seriesTitle: series.title,
-                  paymentType: 'series_access',
-                  customerPaymentId: newPayment.id,
-                  filmmakerId: filmmakerId,
-                  automaticPayout: true,
-                  split: '70/30'
-                },
-              });
-            }
-          }
-        } catch (error) {
-          console.error("❌ Post-payment error:", error);
-        }
+ // Replace the incorrect email call in paySeriesWithMoMo:
+if (isGatewaySuccessful) {
+  try {
+    accessResults = await grantSeriesAccess(newPayment);
+    
+    // 🔥 FIXED: Correct email parameters for series payment
+    try {
+      const user = await User.findByPk(userId);
+      
+      if (user && user.email) {
+        await sendPaymentConfirmation({
+          to: user.email,
+          userName: user.name || 'Valued Customer',
+          movieTitle: `${series.title} Series Access`,
+          amount: parseFloat(finalAmount).toFixed(2),
+          paymentDate: new Date().toLocaleDateString('en-US', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          }),
+          transactionId: newPayment.id,
+          paymentMethod: 'Mobile Money',
+          moviePosterUrl:clearUrl(series.poster) || 'https://images.unsplash.com/photo-1489599809516-9827b6d1cf13?auto=format&fit=crop&w=600&q=80',
+          downloadLink: null, // Series typically don't have bulk download
+          watchLink: `${process.env.FRONTEND_URL || 'https://cinemarwa.com'}/series/${seriesId}?token=${newPayment.id}`,
+          supportEmail: process.env.SUPPORT_EMAIL || 'support@cinemarwa.com'
+        });
+        
+        console.log(`✅ Series access email sent to ${user.email}`);
       }
+    } catch (emailError) {
+      console.error('❌ Failed to send series payment email:', emailError);
+    }
+    
+    // 🔥 CRITICAL: Update filmmaker revenue for series payments (70%)
+    // Even if Lanari Pay handles payout automatically, we need to update our records
+    console.log("💰 Updating filmmaker revenue for series access...");
+    await updateFilmmakerRevenue(newPayment);
+    
+    // If payout numbers weren't sent (or failed), do manual admin payout
+    if (distribution.adminAmount > 0) {
+      // Check if Lanari Pay already handled the payout
+      if (!payoutNumbers) {
+        adminPayoutResults = await processAdminPayout(newPayment, series);
+      } else {
+        console.log("✅ Lanari Pay handled automatic 30% admin payout");
+        // Create a record of the automatic payout
+        await Withdrawal.create({
+          userId: userId,
+          amount: distribution.adminAmount,
+          currency: finalCurrency,
+          phoneNumber: ADMIN_MOMO_NUMBER,
+          status: 'completed',
+          type: 'series_access_admin_fee',
+          description: sanitizeDescription(`Series Access Admin Fee ${series.title} ${accessPeriod}`),
+          referenceId: payment.referenceId,
+          transactionId: payment.data?.gateway_response?.data?.transaction_id,
+          completedAt: new Date(),
+          metadata: {
+            seriesId: series.id,
+            seriesTitle: series.title,
+            paymentType: 'series_access',
+            customerPaymentId: newPayment.id,
+            filmmakerId: filmmakerId,
+            automaticPayout: true,
+            split: '70/30'
+          },
+        });
+      }
+    }
+  } catch (error) {
+    console.error("❌ Post-payment error:", error);
+  }
+}
 
       const episodes = await Movie.findAll({
         where: {
@@ -1615,80 +1530,117 @@ export const paySubscriptionWithMoMo = async (req, res) => {
 
     console.log(`💰 Subscription payment created with amount: ${newPayment.amount}`);
 
-    if (isGatewaySuccessful) {
-      console.log("✅ Gateway successful - Granting subscription access");
+// Replace the incorrect email call in paySubscriptionWithMoMo:
+if (isGatewaySuccessful) {
+  console.log("✅ Gateway successful - Granting subscription access");
+  
+  try {
+    await grantSubscriptionAccess(newPayment);
+    console.log("✅ Subscription access granted");
+    
+    // 🔥 FIXED: Correct email parameters for subscription payment
+    try {
+      const user = await User.findByPk(userId);
       
-      try {
-        await grantSubscriptionAccess(newPayment);
-        console.log("✅ Subscription access granted");
+      if (user && user.email) {
+        const planName = metadata?.planName || 
+                        (planId === 'pro' ? 'Pro Plan' : 
+                         planId === 'enterprise' ? 'Enterprise Plan' : 'Basic Plan');
         
-        // If payout numbers were sent to Lanari Pay, they handle the 100% admin payout automatically
-        // So we only need to update our database records
-        if (distribution.adminAmount > 0) {
-          // Check if Lanari Pay already handled the payout
-          if (!payoutNumbers) {
-            // Manual admin payout if Lanari Pay didn't handle it
-            const adminPayout = await sendMoneyToRecipient(
-              distribution.adminAmount,
-              ADMIN_MOMO_NUMBER,
-              `subscription_admin_${newPayment.id}`,
-              sanitizeDescription(`Subscription Fee ${planId} ${period}`)
-            );
-            
-            if (adminPayout.success) {
-              console.log("✅ Admin subscription fee sent manually");
-              
-              await Withdrawal.create({
-                userId: userId,
-                amount: distribution.adminAmount,
-                currency: finalCurrency,
-                phoneNumber: ADMIN_MOMO_NUMBER,
-                status: 'completed',
-                paymentId: newPayment.id,
-                type: 'subscription_admin_fee',
-                description: sanitizeDescription(`Subscription Fee ${planId} ${period}`),
-                referenceId: adminPayout.referenceId,
-                transactionId: adminPayout.data?.transaction_id,
-                completedAt: new Date(),
-                metadata: {
-                  planId,
-                  period,
-                  paymentType: 'subscription',
-                  customerPaymentId: newPayment.id,
-                },
-              });
-            }
-          } else {
-            console.log("✅ Lanari Pay handled automatic 100% admin payout for subscription");
-            // Create a record of the automatic payout
-            await Withdrawal.create({
-              userId: userId,
-              amount: distribution.adminAmount,
-              currency: finalCurrency,
-              phoneNumber: ADMIN_MOMO_NUMBER,
-              status: 'completed',
-              paymentId: newPayment.id,
-              type: 'subscription_admin_fee',
-              description: sanitizeDescription(`Subscription Fee ${planId} ${period}`),
-              referenceId: referenceId,
-              transactionId: payment?.data?.gateway_response?.data?.transaction_id,
-              completedAt: new Date(),
-              metadata: {
-                planId,
-                period,
-                paymentType: 'subscription',
-                customerPaymentId: newPayment.id,
-                automaticPayout: true,
-                split: '0/100',
-                payoutViaLanari: true,
-              },
-            });
-          }
+        await sendPaymentConfirmation({
+          to: user.email,
+          userName: user.name || 'Valued Customer',
+          movieTitle: `${planName} Subscription`,
+          amount: parseFloat(finalAmount).toFixed(2),
+          paymentDate: new Date().toLocaleDateString('en-US', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          }),
+          transactionId: newPayment.id,
+          paymentMethod: 'Mobile Money',
+          moviePosterUrl: 'https://images.unsplash.com/photo-1574375927938-d5a98e8ffe85?auto=format&fit=crop&w=600&q=80',
+          downloadLink: `${process.env.FRONTEND_URL || 'https://cinemarwa.com'}/library`,
+          watchLink: `${process.env.FRONTEND_URL || 'https://cinemarwa.com'}/library`,
+          supportEmail: process.env.SUPPORT_EMAIL || 'support@cinemarwa.com'
+        });
+        
+        console.log(`✅ Subscription confirmation email sent to ${user.email}`);
+      }
+    } catch (emailError) {
+      console.error('❌ Failed to send subscription email:', emailError);
+    }
+    
+    // If payout numbers were sent to Lanari Pay, they handle the 100% admin payout automatically
+    // So we only need to update our database records
+    if (distribution.adminAmount > 0) {
+      // Check if Lanari Pay already handled the payout
+      if (!payoutNumbers) {
+        // Manual admin payout if Lanari Pay didn't handle it
+        const adminPayout = await sendMoneyToRecipient(
+          distribution.adminAmount,
+          ADMIN_MOMO_NUMBER,
+          `subscription_admin_${newPayment.id}`,
+          sanitizeDescription(`Subscription Fee ${planId} ${period}`)
+        );
+        
+        if (adminPayout.success) {
+          console.log("✅ Admin subscription fee sent manually");
+          
+          await Withdrawal.create({
+            userId: userId,
+            amount: distribution.adminAmount,
+            currency: finalCurrency,
+            phoneNumber: ADMIN_MOMO_NUMBER,
+            status: 'completed',
+            paymentId: newPayment.id,
+            type: 'subscription_admin_fee',
+            description: sanitizeDescription(`Subscription Fee ${planId} ${period}`),
+            referenceId: adminPayout.referenceId,
+            transactionId: adminPayout.data?.transaction_id,
+            completedAt: new Date(),
+            metadata: {
+              planId,
+              period,
+              paymentType: 'subscription',
+              customerPaymentId: newPayment.id,
+            },
+          });
         }
-      } catch (accessError) {
-        console.error("❌ Error granting subscription:", accessError);
+      } else {
+        console.log("✅ Lanari Pay handled automatic 100% admin payout for subscription");
+        // Create a record of the automatic payout
+        await Withdrawal.create({
+          userId: userId,
+          amount: distribution.adminAmount,
+          currency: finalCurrency,
+          phoneNumber: ADMIN_MOMO_NUMBER,
+          status: 'completed',
+          paymentId: newPayment.id,
+          type: 'subscription_admin_fee',
+          description: sanitizeDescription(`Subscription Fee ${planId} ${period}`),
+          referenceId: referenceId,
+          transactionId: payment?.data?.gateway_response?.data?.transaction_id,
+          completedAt: new Date(),
+          metadata: {
+            planId,
+            period,
+            paymentType: 'subscription',
+            customerPaymentId: newPayment.id,
+            automaticPayout: true,
+            split: '0/100',
+            payoutViaLanari: true,
+          },
+        });
       }
     }
+  } catch (accessError) {
+    console.error("❌ Error granting subscription:", accessError);
+  }
+}
 
     return res.status(200).json({
       success: true,
@@ -1734,6 +1686,7 @@ export const paySubscriptionWithMoMo = async (req, res) => {
         note: "Lanari Pay handles automatic 100% admin payout for subscriptions"
       } : { enabled: false },
     });
+    
   } catch (error) {
     console.error("❌ Subscription MoMo Payment Error:", error);
     res.status(500).json({
@@ -2043,7 +1996,10 @@ export const getPaymentStatus = async (req, res) => {
     }
 
     const metadata = payment.metadata || {};
-    
+
+    // Normalize movie poster URL for clients
+    const movieData = payment.movie ? { ...payment.movie.toJSON(), poster: clearUrl(payment.movie.poster) } : null;
+
     res.status(200).json({
       success: true,
       payment: {
@@ -2059,7 +2015,7 @@ export const getPaymentStatus = async (req, res) => {
         filmmakerId: payment.filmmakerId,
         createdAt: payment.createdAt,
         updatedAt: payment.updatedAt,
-        movie: payment.movie,
+        movie: movieData,
         user: payment.user,
         secureDownloadUrl: metadata.secureDownloadUrl || null,
         secureStreamingUrl: metadata.secureStreamingUrl || null,
@@ -2100,9 +2056,16 @@ export const getUserPayments = async (req, res) => {
 
     const total = await Payment.count({ where: { userId } });
 
+    // Normalize movie posters in payments
+    const paymentsData = payments.map(p => {
+      const pj = p.toJSON();
+      if (pj.movie && pj.movie.poster) pj.movie.poster = clearUrl(pj.movie.poster);
+      return pj;
+    });
+
     res.status(200).json({
       success: true,
-      data: payments,
+      data: paymentsData,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -2329,70 +2292,6 @@ export const requestWithdrawal = async (req, res) => {
   }
 };
 
-export const getWithdrawalHistory = async (req, res) => {
-  try {
-    const { userId } = req.user;
-    const { page = 1, limit = 20, status } = req.query;
-
-    const pageNum = Math.max(1, parseInt(page));
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
-    const skip = (pageNum - 1) * limitNum;
-
-    const where = { userId };
-    if (status) where.status = status;
-
-    const withdrawals = await Withdrawal.findAll({
-      where,
-      order: [['createdAt', 'DESC']],
-      offset: skip,
-      limit: limitNum,
-    });
-
-    const total = await Withdrawal.count({ where });
-
-    // 🔥 Use safeParseNumber for sums
-    let totalWithdrawn = 0;
-    let pendingWithdrawals = 0;
-    let processingWithdrawals = 0;
-    
-    withdrawals.forEach(w => {
-      if (w.status === 'completed') {
-        totalWithdrawn += safeParseNumber(w.amount);
-      } else if (w.status === 'pending') {
-        pendingWithdrawals += safeParseNumber(w.amount);
-      } else if (w.status === 'processing') {
-        processingWithdrawals += safeParseNumber(w.amount);
-      }
-    });
-
-    res.status(200).json({
-      success: true,
-      data: {
-        withdrawals,
-        stats: {
-          totalWithdrawn,
-          pendingWithdrawals,
-          processingWithdrawals,
-          totalCount: total
-        }
-      },
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        pages: Math.ceil(total / limitNum),
-      },
-    });
-  } catch (error) {
-    console.error('❌ Error fetching withdrawal history:', error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch withdrawal history",
-      error: error.message
-    });
-  }
-};
-
 export const getFilmmakerFinance = async (req, res) => {
   try {
     const { userId } = req.user; // This comes from auth middleware
@@ -2555,9 +2454,309 @@ export const getFilmmakerFinance = async (req, res) => {
   }
 };
 
+/**
+ * 🔥 CREATE AUTOMATIC PAYOUT WITHDRAWAL RECORDS
+ * This function creates withdrawal records for automatic Lanari Pay payouts
+ * so filmmakers can see their payout history
+ */
+const createAutomaticPayoutRecord = async (payment, filmmaker, movie) => {
+  try {
+    if (!payment.filmmakerAmount || payment.filmmakerAmount === 0) {
+      console.log("ℹ️ No filmmaker amount to record");
+      return null;
+    }
+
+    // Check if we already created a withdrawal record for this payment
+    const existingWithdrawal = await Withdrawal.findOne({
+      where: {
+        paymentId: payment.id,
+        type: 'automatic_payout'
+      }
+    });
+
+    if (existingWithdrawal) {
+      console.log(`ℹ️ Withdrawal record already exists for payment ${payment.id}`);
+      return existingWithdrawal;
+    }
+
+    // Create withdrawal record for the automatic payout
+    const withdrawal = await Withdrawal.create({
+      userId: filmmaker.id,
+      amount: safeParseNumber(payment.filmmakerAmount),
+      currency: payment.currency || 'RWF',
+      phoneNumber: filmmaker.filmmmakerMomoPhoneNumber,
+      status: 'completed', // It's already paid out by Lanari Pay
+      type: 'automatic_payout',
+      payoutMethod: 'momo',
+      description: sanitizeDescription(
+        `Automatic payout for ${movie?.title || 'Content'} - ${payment.type}`
+      ),
+      referenceId: payment.referenceId,
+      transactionId: payment.financialTransactionId,
+      paymentId: payment.id,
+      requestedAt: payment.paymentDate,
+      processedAt: payment.paymentDate,
+      completedAt: payment.paymentDate,
+      metadata: {
+        movieId: movie?.id,
+        movieTitle: movie?.title,
+        paymentType: payment.type,
+        customerPaymentId: payment.id,
+        contentType: movie?.contentType,
+        seriesId: movie?.seriesId,
+        automaticPayout: true,
+        payoutMethod: 'lanari_pay_split',
+        filmmakerPercentage: payment.type === 'series_access' ? 70 : 70,
+        adminPercentage: payment.type === 'series_access' ? 30 : 30,
+      },
+    });
+
+    console.log(`✅ Created automatic payout withdrawal record: ${withdrawal.id}`);
+    return withdrawal;
+
+  } catch (error) {
+    console.error('❌ Error creating automatic payout record:', error);
+    return null;
+  }
+};
+
+/**
+ * 🔥 UPDATED: Process admin payout with withdrawal tracking
+ */
+const processAdminPayout = async (payment, movie) => {
+  try {
+    console.log("🏦 PROCESSING ADMIN PAYOUT FOR PAYMENT:", payment.id);
+
+    const distribution = calculatePaymentDistribution(payment.amount, payment.type);
+
+    if (distribution.adminAmount > 0) {
+      
+      // Check if this was handled by Lanari Pay automatic split
+      const hasLanariPaySplit = payment.metadata?.payoutNumbers;
+      
+      if (hasLanariPaySplit) {
+        console.log("✅ Lanari Pay handled automatic payout - creating tracking record");
+        
+        // Create admin payout record
+        await Withdrawal.create({
+          userId: payment.userId, // Customer who made the payment
+          amount: distribution.adminAmount,
+          currency: payment.currency || 'RWF',
+          phoneNumber: ADMIN_MOMO_NUMBER,
+          status: 'completed',
+          type: payment.type.includes('subscription') || payment.type === 'series_access' 
+            ? 'subscription_admin_fee' 
+            : 'admin_fee',
+          description: sanitizeDescription(`Platform Fee ${payment.type} ${movie?.title || 'Content'}`),
+          referenceId: payment.referenceId,
+          transactionId: payment.financialTransactionId,
+          paymentId: payment.id,
+          requestedAt: payment.paymentDate,
+          processedAt: payment.paymentDate,
+          completedAt: payment.paymentDate,
+          metadata: {
+            movieId: movie?.id,
+            movieTitle: movie?.title,
+            paymentType: payment.type,
+            customerPaymentId: payment.id,
+            filmmakerId: payment.filmmakerId,
+            contentType: movie?.contentType,
+            seriesId: movie?.seriesId,
+            automaticPayout: true,
+            payoutMethod: 'lanari_pay_split',
+          },
+        });
+        
+        console.log("✅ Admin payout tracking record created");
+        return {
+          success: true,
+          admin: {
+            amount: distribution.adminAmount,
+            referenceId: payment.referenceId,
+            status: 'completed',
+            method: 'automatic'
+          }
+        };
+      } else {
+        // Manual payout (fallback)
+        const adminPayout = await sendMoneyToRecipient(
+          distribution.adminAmount,
+          ADMIN_MOMO_NUMBER,
+          `admin_${payment.id}`,
+          sanitizeDescription(`Platform Fee ${payment.type} ${movie?.title || 'Content'}`)
+        );
+
+        if (adminPayout.success) {
+          
+          await Withdrawal.create({
+            userId: payment.userId,
+            amount: distribution.adminAmount,
+            currency: payment.currency || 'RWF',
+            phoneNumber: ADMIN_MOMO_NUMBER,
+            status: 'completed',
+            type: payment.type.includes('subscription') || payment.type === 'series_access' 
+              ? 'subscription_admin_fee' 
+              : 'admin_fee',
+            description: sanitizeDescription(`Platform Fee ${payment.type} ${movie?.title || 'Content'}`),
+            referenceId: adminPayout.referenceId,
+            transactionId: adminPayout.data?.transaction_id,
+            paymentId: payment.id,
+            requestedAt: payment.paymentDate,
+            processedAt: new Date(),
+            completedAt: new Date(),
+            metadata: {
+              movieId: movie?.id,
+              movieTitle: movie?.title,
+              paymentType: payment.type,
+              customerPaymentId: payment.id,
+              filmmakerId: payment.filmmakerId,
+              contentType: movie?.contentType,
+              seriesId: movie?.seriesId,
+              automaticPayout: false,
+              payoutMethod: 'manual_momo',
+            },
+          });
+          
+          console.log("✅ Manual admin payout completed");
+          return {
+            success: true,
+            admin: {
+              amount: distribution.adminAmount,
+              referenceId: adminPayout.referenceId,
+              status: 'completed',
+              method: 'manual'
+            }
+          };
+        } else {
+          console.error("❌ Admin payout failed:", adminPayout.error);
+          return {
+            success: false,
+            error: adminPayout.error
+          };
+        }
+      }
+    } else {
+      console.log("ℹ️ No admin amount to payout");
+      return {
+        success: true,
+        message: 'No admin payout needed'
+      };
+    }
+  } catch (error) {
+    console.error('❌ Error processing admin payout:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * 🔥 UPDATED: Grant movie access with automatic payout tracking
+ */
+const grantMovieAccess = async (payment) => {
+  try {
+    console.log("🎬 GRANTING MOVIE ACCESS FOR PAYMENT:", {
+      id: payment.id,
+      type: payment.type,
+      userId: payment.userId,
+      movieId: payment.movieId
+    });
+    
+    const user = await User.findByPk(payment.userId);
+    const movie = await Movie.findByPk(payment.movieId);
+
+    if (!user || !movie) {
+      throw new Error('User or content not found');
+    }
+
+    // Handle series access
+    if (payment.type === 'series_access') {
+      console.log("📺 Handling series access");
+      const result = await grantSeriesAccess(payment, user);
+      
+      // 🔥 Create automatic payout record for filmmaker
+      if (payment.filmmakerId && payment.filmmakerAmount > 0) {
+        const filmmaker = await User.findByPk(payment.filmmakerId);
+        if (filmmaker) {
+          await createAutomaticPayoutRecord(payment, filmmaker, movie);
+        }
+      }
+      
+      return result;
+    }
+
+    // Calculate expiry date based on access period
+    let expiresAt = null;
+    let accessType = 'view';
+
+    if (payment.type === 'movie_watch' || payment.type === 'watch') {
+      expiresAt = new Date();
+      expiresAt.setHours(expiresAt.getHours() + 48);
+      accessType = 'view';
+
+      user.watchlist = user.watchlist || [];
+      user.watchlist.push({
+        movie: movie.id,
+        grantedAt: new Date(),
+        expiresAt: expiresAt,
+        transactionId: payment.id,
+      });
+    } else if (payment.type === 'movie_download' || payment.type === 'download') {
+      accessType = 'download';
+
+      user.downloads = user.downloads || [];
+      user.downloads.push({
+        movie: movie.id,
+        grantedAt: new Date(),
+        transactionId: payment.id,
+      });
+    }
+
+    await user.save();
+
+    // Create UserAccess record
+    await UserAccess.create({
+      userId: payment.userId,
+      movieId: payment.movieId,
+      accessType: accessType,
+      accessPeriod: payment.accessPeriod || 'one-time',
+      pricePaid: safeParseNumber(payment.amount) || 0,
+      currency: payment.currency || 'RWF',
+      expiresAt: expiresAt,
+      paymentId: payment.id,
+      status: 'active'
+    });
+
+    // Update movie revenue
+    const currentRevenue = safeParseNumber(movie.totalRevenue);
+    const paymentAmount = safeParseNumber(payment.amount);
+    const newRevenue = currentRevenue + paymentAmount;
+    
+    await movie.update({ 
+      totalRevenue: newRevenue,
+      totalViews: (movie.totalViews || 0) + 1
+    });
+
+    // 🔥 Create automatic payout record for filmmaker
+    if (payment.filmmakerId && payment.filmmakerAmount > 0) {
+      const filmmaker = await User.findByPk(payment.filmmakerId);
+      if (filmmaker) {
+        await createAutomaticPayoutRecord(payment, filmmaker, movie);
+      }
+    }
+
+    console.log("✅ Movie access granted successfully");
+    return { success: true };
+  } catch (error) {
+    console.error('❌ Error granting access:', error);
+    throw error;
+  }
+};
+
+/**
+ * 🔥 FIXED: Get All Withdrawals with proper associations
+ */
 export const getAllWithdrawals = async (req, res) => {
   try {
-    const { page = 1, limit = 20, status, userId } = req.query;
+    const { page = 1, limit = 20, status, userId, type } = req.query;
 
     const pageNum = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
@@ -2566,14 +2765,32 @@ export const getAllWithdrawals = async (req, res) => {
     const where = {};
     if (status) where.status = status;
     if (userId) where.userId = userId;
+    if (type) where.type = type;
 
     const withdrawals = await Withdrawal.findAll({
       where,
-      include: [{
-        model: User,
-        as: 'user',
-        attributes: ['id', 'name', 'email']
-      }],
+      include: [
+        {
+          model: User,
+          as: 'user',
+          attributes: ['id', 'name', 'email', 'filmmmakerMomoPhoneNumber'],
+          required: false
+        },
+        {
+          model: Payment,
+          as: 'payment',
+          attributes: ['id', 'amount', 'type', 'paymentDate', 'movieId', 'seriesId'],
+          required: false,
+          include: [
+            {
+              model: Movie,
+              as: 'movie',
+              attributes: ['id', 'title', 'contentType'],
+              required: false
+            }
+          ]
+        }
+      ],
       order: [['createdAt', 'DESC']],
       offset: skip,
       limit: limitNum,
@@ -2581,6 +2798,7 @@ export const getAllWithdrawals = async (req, res) => {
 
     const total = await Withdrawal.count({ where });
 
+    // Calculate stats
     const stats = {
       total: await Withdrawal.count(),
       pending: await Withdrawal.count({ where: { status: 'pending' } }),
@@ -2588,12 +2806,54 @@ export const getAllWithdrawals = async (req, res) => {
       completed: await Withdrawal.count({ where: { status: 'completed' } }),
       rejected: await Withdrawal.count({ where: { status: 'rejected' } }),
       totalAmount: await Withdrawal.sum('amount', { where: { status: 'completed' } }) || 0,
+      
+      // Breakdown by type
+      automaticPayouts: await Withdrawal.count({ 
+        where: { type: 'automatic_payout', status: 'completed' } 
+      }),
+      manualWithdrawals: await Withdrawal.count({ 
+        where: { type: 'manual_withdrawal', status: 'completed' } 
+      }),
+      adminFees: await Withdrawal.count({ 
+        where: { type: 'admin_fee', status: 'completed' } 
+      }),
+      
+      // Amount breakdown
+      automaticPayoutAmount: await Withdrawal.sum('amount', { 
+        where: { type: 'automatic_payout', status: 'completed' } 
+      }) || 0,
+      manualWithdrawalAmount: await Withdrawal.sum('amount', { 
+        where: { type: 'manual_withdrawal', status: 'completed' } 
+      }) || 0,
+      adminFeeAmount: await Withdrawal.sum('amount', { 
+        where: { type: 'admin_fee', status: 'completed' } 
+      }) || 0,
     };
+
+    // Transform withdrawals to include payment info
+    const transformedWithdrawals = withdrawals.map(w => {
+      const withdrawal = w.toJSON();
+      
+      return {
+        ...withdrawal,
+        contentInfo: w.payment?.movie ? {
+          title: w.payment.movie.title,
+          type: w.payment.movie.contentType,
+          paymentType: w.payment.type
+        } : null,
+        filmmakerInfo: w.user ? {
+          id: w.user.id,
+          name: w.user.name,
+          email: w.user.email,
+          phoneNumber: w.user.filmmmakerMomoPhoneNumber
+        } : null
+      };
+    });
 
     res.status(200).json({
       success: true,
       data: {
-        withdrawals,
+        withdrawals: transformedWithdrawals,
         stats
       },
       pagination: {
@@ -2608,10 +2868,126 @@ export const getAllWithdrawals = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch withdrawals",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * 🔥 FIXED: Get Withdrawal History for filmmaker
+ */
+export const getWithdrawalHistory = async (req, res) => {
+  try {
+    const { userId } = req.user;
+    const { page = 1, limit = 20, status, type } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
+
+    const where = { userId };
+    if (status) where.status = status;
+    if (type) where.type = type;
+
+    const withdrawals = await Withdrawal.findAll({
+      where,
+      include: [
+        {
+          model: Payment,
+          as: 'payment',
+          attributes: ['id', 'amount', 'type', 'paymentDate', 'movieId'],
+          required: false,
+          include: [
+            {
+              model: Movie,
+              as: 'movie',
+              attributes: ['id', 'title', 'contentType'],
+              required: false
+            }
+          ]
+        }
+      ],
+      order: [['createdAt', 'DESC']],
+      offset: skip,
+      limit: limitNum,
+    });
+
+    const total = await Withdrawal.count({ where });
+
+    // Calculate stats
+    let totalWithdrawn = 0;
+    let pendingWithdrawals = 0;
+    let processingWithdrawals = 0;
+    let automaticPayouts = 0;
+    let manualWithdrawals = 0;
+    
+    withdrawals.forEach(w => {
+      const amount = safeParseNumber(w.amount);
+      
+      if (w.status === 'completed') {
+        totalWithdrawn += amount;
+        
+        if (w.type === 'automatic_payout') {
+          automaticPayouts += amount;
+        } else if (w.type === 'manual_withdrawal') {
+          manualWithdrawals += amount;
+        }
+      } else if (w.status === 'pending') {
+        pendingWithdrawals += amount;
+      } else if (w.status === 'processing') {
+        processingWithdrawals += amount;
+      }
+    });
+
+    // Transform withdrawals with content info
+    const transformedWithdrawals = withdrawals.map(w => ({
+      ...w.toJSON(),
+      contentInfo: w.payment?.movie ? {
+        title: w.payment.movie.title,
+        type: w.payment.movie.contentType,
+        paymentType: w.payment.type
+      } : null
+    }));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        withdrawals: transformedWithdrawals,
+        stats: {
+          totalWithdrawn,
+          pendingWithdrawals,
+          processingWithdrawals,
+          automaticPayouts,
+          manualWithdrawals,
+          totalCount: total,
+          
+          // Breakdown by type
+          completedCount: withdrawals.filter(w => w.status === 'completed').length,
+          automaticPayoutCount: withdrawals.filter(
+            w => w.type === 'automatic_payout' && w.status === 'completed'
+          ).length,
+          manualWithdrawalCount: withdrawals.filter(
+            w => w.type === 'manual_withdrawal' && w.status === 'completed'
+          ).length,
+        }
+      },
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum),
+      },
+    });
+  } catch (error) {
+    console.error('❌ Error fetching withdrawal history:', error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch withdrawal history",
       error: error.message
     });
   }
 };
+
 
 export const processWithdrawal = async (req, res) => {
   try {
@@ -2844,8 +3220,8 @@ export const getSeriesPricing = async (req, res) => {
         id: series.id,
         title: series.title,
         overview: series.overview,
-        poster: series.poster,
-        backdrop: series.backdrop,
+        poster: clearUrl(series.poster),
+        backdrop: clearUrl(series.backdrop),
         totalEpisodes: episodes.length,
         totalSeasons: series.totalSeasons,
       },

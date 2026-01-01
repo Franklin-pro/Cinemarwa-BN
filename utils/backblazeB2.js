@@ -2,6 +2,7 @@ import B2 from "backblaze-b2";
 import multer from "multer";
 import path from "path";
 import crypto from "crypto";
+import axios from "axios";
 
 // Initialize B2 instance
 let b2Instance = null;
@@ -53,95 +54,287 @@ export const getBucketInfo = async () => {
   }
 };
 
+// ====== BUNNY CDN INTEGRATION ======
+
 /**
- * Get B2 file download URL
- * Format: https://{API_ENDPOINT}/file/{BUCKET_NAME}/{FILE_PATH}
+ * Get Bunny CDN URL for file
+ * Format: https://{pull-zone-hostname}/{file-path}
  * @param {string} fileName - File name in B2 bucket
- * @returns {string} Download URL
+ * @returns {string} Bunny CDN URL
  */
-/**
- * Get B2 file download URL
- * Format: https://f003.backblazeb2.com/file/<BUCKET>/<FILE_PATH>
- */
-export const getB2DownloadUrl = (fileName) => {
-  const apiEndpoint = process.env.B2_DOWNLOAD_URL; // Example: f003.backblazeb2.com
-  const bucketName = process.env.B2_BUCKET_NAME;
-
-  if (!apiEndpoint) {
-    throw new Error(
-      "❌ Missing B2_DOWNLOAD_URL. Example: B2_DOWNLOAD_URL=f003.backblazeb2.com"
-    );
+export const getBunnyCDNUrl = (fileInput) => {
+  // Check if input is null/undefined/empty
+  if (!fileInput) {
+    // console.warn('⚠️ getBunnyCDNUrl: fileInput is null or empty');
+    return null;
   }
 
-  if (!bucketName) {
-    throw new Error(
-      "❌ Missing B2_BUCKET_NAME. Example: B2_BUCKET_NAME=cinemarwanda"
-    );
+  // Extract the file path from the input
+  let filePath = fileInput;
+  
+  // CASE 1: Input is a full S3 URL (e.g., https://s3.us-east-005.backblazeb2.com/file/cinemarwanda/...)
+  if (fileInput.includes('s3.us-east-005.backblazeb2.com')) {
+    try {
+      const url = new URL(fileInput);
+      // Extract path after '/file/cinemarwanda/'
+      // Example: "/file/cinemarwanda/movies/videos/file.mp4" → "movies/videos/file.mp4"
+      const fullPath = url.pathname;
+      
+      // Remove '/file/cinemarwanda/' prefix
+      if (fullPath.startsWith('/file/cinemarwanda/')) {
+        filePath = fullPath.substring('/file/cinemarwanda/'.length);
+      } else if (fullPath.startsWith('/')) {
+        // If it starts with just '/', remove it
+        filePath = fullPath.substring(1);
+      } else {
+        filePath = fullPath;
+      }
+    } catch (e) {
+      console.warn('⚠️ Could not parse S3 URL:', fileInput);
+    }
+  }
+  // CASE 2: Input is a full friendly B2 URL (e.g., https://f005.backblazeb2.com/file/cinemarwanda/...)
+  else if (fileInput.includes('backblazeb2.com/file/')) {
+    try {
+      const url = new URL(fileInput);
+      const fullPath = url.pathname;
+      
+      // Remove '/file/cinemarwanda/' prefix
+      if (fullPath.startsWith('/file/cinemarwanda/')) {
+        filePath = fullPath.substring('/file/cinemarwanda/'.length);
+      } else {
+        filePath = fullPath.substring(1); // Remove leading '/'
+      }
+    } catch (e) {
+      console.warn('⚠️ Could not parse B2 URL:', fileInput);
+    }
+  }
+  // CASE 3: Input is already just a file path (e.g., "movies/videos/file.mp4")
+  else {
+    filePath = fileInput;
   }
 
-  // Correct B2 public URL
-  return `https://${apiEndpoint}/file/${bucketName}/${fileName}`;
+  // Now generate the Bunny CDN URL
+  if (!process.env.BUNNY_ENABLED || process.env.BUNNY_ENABLED !== 'true') {
+    return getDirectB2Url(filePath);
+  }
+
+  if (!process.env.BUNNY_PULL_ZONE_HOSTNAME) {
+    return getDirectB2Url(filePath);
+  }
+
+  // Clean up the file path (remove leading slash if present)
+  const cleanFilePath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
+  
+  // CORRECT Bunny CDN URL format
+  const cdnUrl = `https://${process.env.BUNNY_PULL_ZONE_HOSTNAME}/${cleanFilePath}`;
+  
+  // console.log('🔗 Generated Bunny CDN URL:', cdnUrl);
+  // console.log('📁 Extracted file path:', cleanFilePath);
+  
+  return cdnUrl;
 };
 
+export const getDirectB2Url = (fileName) => {
+  // Check if fileName is null, undefined, or empty
+  if (!fileName) {
+    console.warn('⚠️ getDirectB2Url: fileName is null or empty');
+    return null;
+  }
+
+  const bucketName = process.env.B2_BUCKET_NAME;
+  const s3Endpoint = process.env.B2_S3_ENDPOINT || `https://${bucketName}.s3.us-east-005.backblazeb2.com`;
+  
+  if (!bucketName) {
+    throw new Error("❌ Missing B2_BUCKET_NAME. Example: B2_BUCKET_NAME=cinemarwanda");
+  }
+
+  // Now it's safe to call .startsWith()
+  const cleanFileName = fileName.startsWith('/') ? fileName.substring(1) : fileName;
+  const b2Url = `${s3Endpoint}/${cleanFileName}`;
+  
+  console.log('🔗 Generated Direct B2 URL:', b2Url);
+  return b2Url;
+};
+/**
+ * Get streaming URLs with fallback logic
+ * Returns primary (Bunny CDN) and fallback (direct B2) URLs
+ * @param {string} filePath - File path in B2 bucket
+ * @param {Object} options - Options
+ * @returns {Object} Streaming URLs object
+ */
+export const getStreamingUrls = (filePath, options = {}) => {
+  const useCDN = options.useCDN !== false && process.env.BUNNY_ENABLED === 'true';
+  const cdnUrl = getBunnyCDNUrl(filePath);
+  const directUrl = getDirectB2Url(filePath);
+  
+  return {
+    primary: useCDN ? cdnUrl : directUrl,
+    fallback: directUrl,
+    cdnUrl: cdnUrl,
+    directUrl: directUrl,
+    cdnEnabled: process.env.BUNNY_ENABLED === 'true',
+    cdnHostname: process.env.BUNNY_PULL_ZONE_HOSTNAME,
+    cdnType: 'bunny',
+  };
+};
 
 /**
- * Upload file to B2
+ * Purge Bunny CDN cache for a specific file
+ * @param {string} filePath - File path to purge
+ * @returns {Promise<Object>} Purge result
+ */
+export const purgeBunnyCache = async (filePath) => {
+  if (process.env.BUNNY_ENABLED !== 'true') {
+    console.log('ℹ️ Bunny CDN not enabled, skipping cache purge');
+    return { success: false, message: 'Bunny CDN not enabled' };
+  }
+
+  try {
+    const bunnyApiKey = process.env.BUNNY_API_KEY;
+    const pullZoneId = process.env.BUNNY_PULL_ZONE_ID;
+    
+    if (!bunnyApiKey) {
+      return { 
+        success: false, 
+        message: 'BUNNY_API_KEY not configured'
+      };
+    }
+
+    // Method 1: Using Bunny's purge URL endpoint
+    const purgeUrl = `https://api.bunny.net/purge`;
+    const fullUrl = `https://${process.env.BUNNY_PULL_ZONE_HOSTNAME}/${filePath}`;
+    
+    const response = await axios.post(purgeUrl, 
+      { url: fullUrl },
+      {
+        headers: {
+          'AccessKey': bunnyApiKey,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    console.log('🔄 Bunny cache purged for:', filePath);
+    return { 
+      success: true, 
+      data: response.data,
+      message: 'Cache purged successfully'
+    };
+  } catch (error) {
+    console.error('❌ Bunny cache purge failed:', error.message);
+    return { 
+      success: false, 
+      message: error.message,
+      error: error.response?.data || error.message
+    };
+  }
+};
+
+/**
+ * Upload file to B2 and return Bunny CDN URLs
  * @param {Buffer} fileBuffer - File buffer
  * @param {string} fileName - Original file name
  * @param {Object} options - Upload options
- * @returns {Promise} Upload result with URL and fileId
+ * @returns {Promise<Object>} Upload result with URLs
  */
 export const uploadToB2 = async (fileBuffer, fileName, options = {}) => {
   try {
+    console.log('🔼 uploadToB2 called', { fileName, folder: options.folder });
     const b2 = await initializeB2();
 
-    // Determine file path based on type
-    let filePath = fileName;
+    // Sanitize and create unique filename
+    const ext = path.extname(fileName).toLowerCase();
+    const nameWithoutExt = path.basename(fileName, ext);
+
+    const sanitizedName = nameWithoutExt
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .trim();
+    
+    const uniqueId = crypto.randomBytes(4).toString("hex");
+    const sanitizedFileName = `${sanitizedName}-${uniqueId}${ext}`;
+
+    // Determine file path
+    let filePath = sanitizedFileName;
+    let folder = options.folder || "uploads";
 
     if (options.folder) {
-      // Remove extension from fileName for cleaner path
-      const ext = path.extname(fileName);
-      const nameWithoutExt = path.basename(fileName, ext);
-
-      // Create unique file name to avoid conflicts
-      const uniqueName = `${nameWithoutExt}-${crypto.randomBytes(4).toString("hex")}${ext}`;
-      filePath = `${options.folder}/${uniqueName}`;
+      filePath = `${options.folder}/${sanitizedFileName}`;
+      folder = options.folder;
     }
 
-    // Get bucket ID from environment
+    // Get upload URL from B2
     const bucketId = process.env.B2_BUCKET_ID;
-
-    // Get upload URL
     const uploadUrlResponse = await b2.getUploadUrl({ bucketId });
     const uploadUrl = uploadUrlResponse.data.uploadUrl;
     const authToken = uploadUrlResponse.data.authorizationToken;
 
-    // Prepare upload data
+    // Determine content type
+    let contentType = options.mimeType || "application/octet-stream";
+    const contentTypeMap = {
+      '.mp4': 'video/mp4',
+      '.mov': 'video/quicktime',
+      '.avi': 'video/x-msvideo',
+      '.mkv': 'video/x-matroska',
+      '.webm': 'video/webm',
+      '.m3u8': 'application/x-mpegURL',
+      '.ts': 'video/MP2T',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.gif': 'image/gif'
+    };
+
+    if (contentTypeMap[ext]) {
+      contentType = contentTypeMap[ext];
+    }
+
+    // Upload to B2
     const uploadOptions = {
       uploadUrl,
       uploadAuthToken: authToken,
       fileName: filePath,
       data: fileBuffer,
-      onUploadProgress: null,
-      contentType: options.mimeType || "application/octet-stream",
+      onUploadProgress: options.onUploadProgress || null,
+      contentType: contentType,
     };
 
-    // Upload file using B2 SDK
     const uploadResult = await b2.uploadFile(uploadOptions);
-
-    // Extract file info from response
     const uploadData = uploadResult.data;
-    const downloadUrl = getB2DownloadUrl(filePath);
+
+    // Generate URLs
+    const streamingUrls = getStreamingUrls(filePath);
+    const cdnUrl = getBunnyCDNUrl(filePath);
+    const directUrl = getDirectB2Url(filePath);
+
+    console.log('✅ Upload successful', { 
+      originalFileName: fileName,
+      sanitizedFileName: sanitizedFileName,
+      filePath, 
+      cdnUrl, 
+      directUrl,
+      fileId: uploadData.fileId,
+      contentType 
+    });
 
     return {
       fileId: uploadData.fileId,
       fileName: filePath,
-      downloadUrl: downloadUrl,
-      secure_url: downloadUrl, // Keep Cloudinary compatibility
-      public_id: filePath, // Keep Cloudinary compatibility
+      downloadUrl: cdnUrl,
+      directUrl: directUrl,
+      secure_url: cdnUrl,
+      public_id: filePath, 
       bytes: uploadData.contentLength,
-      mimeType: uploadData.contentType,
+      mimeType: contentType,
       uploadedAt: new Date(),
+      folder: folder,
+      cdnEnabled: process.env.BUNNY_ENABLED === 'true',
+      originalName: fileName,
+      streamingUrls: streamingUrls,
     };
   } catch (error) {
     let errorMsg = "Unknown error";
@@ -160,11 +353,12 @@ export const uploadToB2 = async (fileBuffer, fileName, options = {}) => {
 };
 
 /**
- * Delete file from B2
+ * Delete file from B2 and optionally purge CDN cache
  * @param {string} fileName - File name in B2 bucket
- * @returns {Promise} Deletion result
+ * @param {boolean} purgeCache - Whether to purge CDN cache
+ * @returns {Promise<Object>} Deletion result
  */
-export const deleteFromB2 = async (fileName) => {
+export const deleteFromB2 = async (fileName, purgeCache = true) => {
   try {
     const b2 = await initializeB2();
     const bucketId = process.env.B2_BUCKET_ID;
@@ -176,7 +370,6 @@ export const deleteFromB2 = async (fileName) => {
       maxFileCount: 1,
     });
 
-    // Find exact file match
     const fileToDelete = listResponse.data.files.find(
       (f) => f.fileName === fileName
     );
@@ -186,14 +379,25 @@ export const deleteFromB2 = async (fileName) => {
       return { success: false, message: "File not found" };
     }
 
-    // Delete the file
-    const deleteResponse = await b2.deleteFile({
+    // Delete from B2
+    await b2.deleteFile({
       fileId: fileToDelete.fileId,
       fileName: fileToDelete.fileName,
     });
 
+    // Purge from Bunny CDN cache if enabled
+    let purgeResult = null;
+    if (purgeCache && process.env.BUNNY_ENABLED === 'true') {
+      purgeResult = await purgeBunnyCache(fileName);
+    }
+
     console.log(`✅ Deleted from B2: ${fileName}`);
-    return { success: true, fileName };
+    return { 
+      success: true, 
+      fileName,
+      cdnPurged: purgeCache && process.env.BUNNY_ENABLED === 'true',
+      purgeResult: purgeResult
+    };
   } catch (error) {
     let errorMsg = "Unknown error";
 
@@ -206,8 +410,102 @@ export const deleteFromB2 = async (fileName) => {
     }
 
     console.error("❌ B2 deletion error:", errorMsg);
-    // Don't throw - file might already be deleted
     return { success: false, message: errorMsg };
+  }
+};
+
+/**
+ * Test Bunny CDN connection
+ * @returns {Promise<Object>} Test result
+ */
+export const testBunnyCDN = async () => {
+  try {
+    if (process.env.BUNNY_ENABLED !== 'true') {
+      return {
+        success: false,
+        message: 'Bunny CDN is not enabled',
+        enabled: false
+      };
+    }
+
+    if (!process.env.BUNNY_PULL_ZONE_HOSTNAME) {
+      return {
+        success: false,
+        message: 'BUNNY_PULL_ZONE_HOSTNAME not configured',
+        enabled: false
+      };
+    }
+
+    const testUrl = `https://${process.env.BUNNY_PULL_ZONE_HOSTNAME}/`;
+    
+    const response = await axios.head(testUrl, { timeout: 5000 });
+    
+    return {
+      success: true,
+      message: 'Bunny CDN is responding',
+      enabled: true,
+      hostname: process.env.BUNNY_PULL_ZONE_HOSTNAME,
+      status: response.status,
+      statusText: response.statusText,
+      configStatus: '✅ Bunny CDN properly configured'
+    };
+  } catch (error) {
+    if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+      return {
+        success: false,
+        message: 'Bunny CDN hostname not reachable',
+        enabled: process.env.BUNNY_ENABLED === 'true',
+        hostname: process.env.BUNNY_PULL_ZONE_HOSTNAME,
+        error: error.message,
+        configStatus: '❌ DNS or connectivity issue'
+      };
+    }
+    
+    return {
+      success: true, 
+      message: 'Bunny CDN is responding (non-200 status expected for root)',
+      enabled: true,
+      hostname: process.env.BUNNY_PULL_ZONE_HOSTNAME,
+      error: error.message,
+      configStatus: '✅ Bunny CDN reachable'
+    };
+  }
+};
+
+/**
+ * Get Bunny CDN statistics
+ * @returns {Promise<Object>} CDN statistics
+ */
+export const getBunnyStats = async () => {
+  try {
+    if (process.env.BUNNY_ENABLED !== 'true' || !process.env.BUNNY_API_KEY) {
+      return {
+        success: false,
+        message: 'Bunny CDN not configured for statistics'
+      };
+    }
+
+    const statsUrl = `https://api.bunny.net/statistics`;
+    
+    const response = await axios.get(statsUrl, {
+      headers: {
+        'AccessKey': process.env.BUNNY_API_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    return {
+      success: true,
+      data: response.data,
+      message: 'Bunny CDN statistics retrieved'
+    };
+  } catch (error) {
+    console.error('❌ Failed to get Bunny CDN statistics:', error.message);
+    return {
+      success: false,
+      message: error.message,
+      error: error.response?.data || error.message
+    };
   }
 };
 
@@ -227,10 +525,19 @@ const imageStorage = multer.memoryStorage();
  * File filter for videos
  */
 const videoFileFilter = (req, file, cb) => {
-  if (file.mimetype.startsWith("video/")) {
+  const allowedVideoTypes = [
+    'video/mp4', 
+    'video/quicktime', 
+    'video/x-msvideo', 
+    'video/x-matroska',
+    'video/webm',
+    'application/x-mpegURL'
+  ];
+  
+  if (file.mimetype.startsWith("video/") || allowedVideoTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error("Only video files are allowed"), false);
+    cb(new Error("Only video files are allowed (MP4, MOV, AVI, MKV, WebM, HLS)"), false);
   }
 };
 
@@ -310,6 +617,33 @@ export const uploadMovieFilesMiddleware = () => {
   ]);
 };
 
+/**
+ * Utility to clear URL formatting
+ * @param {string} url - URL to clean
+ * @returns {string} Cleaned URL
+ */
+export const clearUrl = (url) => {
+  if (!url) return url;
+
+  let u = url.split('?')[0].split('#')[0];
+
+  // Convert s3.us-east-005.backblazeb2.com/file/... -> f005.backblazeb2.com/file/...
+  const s3Regex = /^https?:\/\/s3\.us-(?:east|west)-0*(\d+)\.backblazeb2\.com\/file\/(.+)$/;
+  const m = u.match(s3Regex);
+  if (m) {
+    const fNumber = m[1].padStart(3, '0');
+    return `https://f${fNumber}.backblazeb2.com/file/${m[2]}`;
+  }
+
+  u = u.replace(/^https?:\/\/s3\.us-(?:east|west)-0*(\d+)\./, (match, p1) => `https://f${String(p1).padStart(3, '0')}.`);
+
+  return u;
+};
+
+// Legacy compatibility
+export const getB2DownloadUrl = getDirectB2Url;
+export const getCDNUrl = getBunnyCDNUrl;
+
 export default {
   initializeB2,
   uploadToB2,
@@ -319,4 +653,12 @@ export default {
   uploadMovieFilesMiddleware,
   getB2DownloadUrl,
   getBucketInfo,
+  clearUrl,
+  // Bunny CDN functions
+  getBunnyCDNUrl,
+  getDirectB2Url,
+  getStreamingUrls,
+  purgeBunnyCache,
+  testBunnyCDN,
+  getBunnyStats,
 };

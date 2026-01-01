@@ -14,6 +14,7 @@ import {
   getPaymentMethod,
   getSeriesEpisodes,
   getFilmmmakerNotifications,
+  getFilmmakerAnalytics,
 } from "../controllers/filmmmakerController.js";
 import {
   authenticateToken,
@@ -77,6 +78,12 @@ router.get(
   getPaymentMethod
 );
 router.get(
+  "/analytics",
+  authenticateToken,
+  requireFilmmaker,
+  getFilmmakerAnalytics
+)
+router.get(
   "/notifications",
   authenticateToken,
   requireFilmmaker,
@@ -123,7 +130,7 @@ router.get(
   "/withdrawals",
   authenticateToken,
   requireFilmmaker,
-  getAllWithdrawals
+ getWithdrawalHistory
 );
 
 // ====== MOVIE MANAGEMENT ======

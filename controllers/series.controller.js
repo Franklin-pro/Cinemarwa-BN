@@ -1,7 +1,7 @@
 import Movie from "../models/Movie.model.js";
 import UserAccess from "../models/userAccess.model.js";
 import slugify from "slugify";
-import { uploadToB2, deleteFromB2 } from "../utils/backblazeB2.js";
+import { uploadToB2, deleteFromB2, clearUrl } from "../utils/backblazeB2.js"; 
 import { Op } from "sequelize";
 
 // Helper function to calculate expiry date
@@ -222,8 +222,8 @@ export const createSeries = async (req, res) => {
           accessPeriod: series.accessPeriod,
           pricingTiers: series.pricingTiers,
           releaseSchedule: series.releaseSchedule,
-          poster: series.poster,
-          backdrop: series.backdrop,
+          poster: clearUrl(series.poster),
+          backdrop: clearUrl(series.backdrop),
           status: series.status,
         },
       },
@@ -470,8 +470,8 @@ export const addEpisode = async (req, res) => {
           viewPrice: episode.viewPrice,
           accessPeriod: episode.accessPeriod,
           pricingTiers: episode.pricingTiers,
-          poster: episode.poster,
-          videoUrl: episode.videoUrl,
+          poster: clearUrl(episode.poster),
+          videoUrl: clearUrl(episode.videoUrl),
           videoDuration: episode.videoDuration,
           status: episode.status,
         },
@@ -560,8 +560,8 @@ export const getSeriesEpisodes = async (req, res) => {
           id: series.id,
           title: series.title,
           overview: series.overview,
-          poster: series.poster,
-          backdrop: series.backdrop,
+          poster: clearUrl(series.poster),
+          backdrop: clearUrl(series.backdrop),
           totalSeasons: Object.keys(seasons).length,
           totalEpisodes: count,
           viewPrice: series.viewPrice,
@@ -1119,7 +1119,7 @@ export const getUserSeriesAccess = async (req, res) => {
           id: access.id,
           seriesId: access.seriesId,
           seriesTitle: access.series?.title,
-          seriesPoster: access.series?.poster,
+          seriesPoster: clearUrl(access.series?.poster),
           accessPeriod: access.accessPeriod,
           accessPeriodLabel: getAccessPeriodLabel(access.accessPeriod),
           pricePaid: access.pricePaid,
@@ -1219,7 +1219,7 @@ export const getSeriesPricing = async (req, res) => {
           id: series.id,
           title: series.title,
           overview: series.overview,
-          poster: series.poster,
+          poster: clearUrl(series.poster),
           totalEpisodes: episodes.length,
           totalSeasons: series.totalSeasons,
           currency: series.currency || "RWF",

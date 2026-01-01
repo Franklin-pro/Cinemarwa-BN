@@ -9,7 +9,7 @@ describe('Categories parsing', () => {
     // Arrange - mock dependent modules before importing the controller
     const mockCreate = jest.fn(async (input) => ({ id: '1', ...input, toJSON() { return { id: '1', ...input }; } }));
     jest.unstable_mockModule('../models/Movie.model.js', () => ({ default: { create: mockCreate } }));
-    jest.unstable_mockModule('../utils/backblazeB2.js', () => ({ uploadToB2: jest.fn().mockResolvedValue({ secure_url: 'https://example.com/img.jpg', public_id: 'img-id' }), deleteFromB2: jest.fn() }));
+    jest.unstable_mockModule('../utils/backblazeB2.js', () => ({ uploadToB2: jest.fn().mockResolvedValue({ secure_url: 'https://example.com/img.jpg', public_id: 'img-id' }), deleteFromB2: jest.fn(), clearUrl: (u) => u }));
 
     const { addMovie } = await import('../controllers/movieController.js');
     const Movie = (await import('../models/Movie.model.js')).default;

@@ -32,7 +32,7 @@ const Withdrawal = sequelize.define('Withdrawal', {
     allowNull: false,
   },
   status: {
-    type: DataTypes.ENUM('pending', 'processing', 'completed', 'failed', 'cancelled'),
+    type: DataTypes.ENUM('pending', 'processing', 'completed', 'failed', 'cancelled', 'rejected'),
     defaultValue: 'pending',
   },
   referenceId: {
@@ -54,7 +54,7 @@ const Withdrawal = sequelize.define('Withdrawal', {
     comment: 'Associated payment that triggered this withdrawal',
   },
   type: {
-    type: DataTypes.ENUM('filmmaker_earning', 'admin_fee', 'manual_withdrawal'),
+    type: DataTypes.ENUM('filmmaker_earning', 'admin_fee', 'manual_withdrawal', 'automatic_payout', 'subscription_admin_fee', 'series_access_admin_fee'),
     allowNull: false,
     defaultValue: 'filmmaker_earning',
   },
