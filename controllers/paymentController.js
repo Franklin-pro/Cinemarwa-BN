@@ -45,7 +45,7 @@ const subscriptionPaymentSchema = Joi.object({
   planId: Joi.string().required(),
   period: Joi.string().valid("month", "year").default("month"),
   email: Joi.string().email(),
-  currency: Joi.string().valid("USD", "EUR", "GHS", "XOF", "RWF").default("EUR"),
+  currency: Joi.string().valid("USD", "EUR", "GHS", "XOF", "RWF").default("RWF"),
   type: Joi.string().valid("subscription_upgrade", "subscription_renewal").required(),
   description: Joi.string().max(500),
   filmmakersAmount: Joi.number().positive().optional(),
