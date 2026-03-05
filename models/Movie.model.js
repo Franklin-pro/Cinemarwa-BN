@@ -2,7 +2,7 @@ import { DataTypes } from "sequelize";
 import sequelize from "../config/database.js";
 
 const Movie = sequelize.define(
-  "Movie",
+  "movie",
   {
     id: {
       type: DataTypes.UUID,
@@ -214,7 +214,7 @@ const Movie = sequelize.define(
   },
 
   {
-    tableName: "Movies",
+    tableName: "movies",
     timestamps: true,
 
     // ===================== CLEAN INDEXES =====================

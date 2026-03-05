@@ -1,7 +1,7 @@
 import { DataTypes } from 'sequelize';
 import sequelize from '../config/database.js';
 
-const Withdrawal = sequelize.define('Withdrawal', {
+const Withdrawal = sequelize.define('withdrawal', {
   id: {
     type: DataTypes.UUID,
     defaultValue: DataTypes.UUIDV4,
@@ -11,7 +11,7 @@ const Withdrawal = sequelize.define('Withdrawal', {
     type: DataTypes.UUID,
     allowNull: false,
     references: {
-      model: 'Users',
+      model: 'users',
       key: 'id',
     },
   },
@@ -48,7 +48,7 @@ const Withdrawal = sequelize.define('Withdrawal', {
     type: DataTypes.UUID,
     allowNull: true,
     references: {
-      model: 'Payments',
+      model: 'payments',
       key: 'id',
     },
     comment: 'Associated payment that triggered this withdrawal',

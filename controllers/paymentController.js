@@ -9,7 +9,7 @@ import Joi from "joi";
 import Withdrawal from "../models/withdrawal.js";
 import { calculateExpiryDate, getAccessPeriodLabel } from "../utils/dateUtils.js";
 import { sendPaymentConfirmation } from "../utils/subscribeEmail.js";
-import { clearUrl } from "../utils/backblazeB2.js";
+import { getDirectB2Url } from "../utils/backblazeB2.js";
 
 // ====== PAYMENT DISTRIBUTION CONFIGURATION ======
 const FILMMAKER_SHARE = parseFloat(process.env.FILMMAKER_SHARE_PERCENTAGE) || 70;
@@ -667,6 +667,39 @@ export const payWithMoMo = async (req, res) => {
       payoutNumbers // Pass payout numbers here
     );
 
+    // Check for balance error
+    if (!payment.success) {
+      const errorMessage = payment.error || '';
+      const gatewayError = payment.data?.error || '';
+      const gatewayMessage = payment.data?.gateway_response?.data?.message || '';
+      
+      let userFriendlyMessage = "Payment initiation failed";
+      
+      if (
+        errorMessage.includes('Check users Balance') || 
+        errorMessage.includes('users Balance') ||
+        gatewayError.includes('Check users Balance') ||
+        gatewayMessage.includes('Check users Balance') ||
+        gatewayMessage.includes('Balance')
+      ) {
+        userFriendlyMessage = "Ntamafranga ufite ahagije. Ongera amafranga wishyure!";
+      } else if (gatewayMessage) {
+        userFriendlyMessage = gatewayMessage;
+      }
+      
+      return res.status(400).json({
+        success: false,
+        message: userFriendlyMessage,
+        error: payment.error,
+        details: {
+          amount: finalAmount,
+          currency: finalCurrency,
+          userMessage: userFriendlyMessage,
+          technicalError: payment.error
+        }
+      });
+    }
+
     if (payment.success) {
       const gatewayStatus = payment.data?.gateway_response?.data?.status;
       const isGatewaySuccessful = gatewayStatus === "SUCCESSFUL";
@@ -747,7 +780,7 @@ if (isGatewaySuccessful) {
           }),
           transactionId: newPayment.id,
           paymentMethod: 'Mobile Money',
-          moviePosterUrl:clearUrl(movie.poster)  || 'https://images.unsplash.com/photo-1489599809516-9827b6d1cf13?auto=format&fit=crop&w=600&q=80',
+          moviePosterUrl:getDirectB2Url(movie.poster)  || 'https://images.unsplash.com/photo-1489599809516-9827b6d1cf13?auto=format&fit=crop&w=600&q=80',
           downloadLink: type.includes('download') || type === 'download' ? 
             `${process.env.FRONTEND_URL || 'https://cinemarwa.com'}/download/${movieId}?token=${newPayment.id}` : 
             null,
@@ -968,6 +1001,39 @@ export const paySeriesWithMoMo = async (req, res) => {
       payoutNumbers // Pass payout numbers here
     );
 
+    // Check for balance error
+    if (!payment.success) {
+      const errorMessage = payment.error || '';
+      const gatewayError = payment.data?.error || '';
+      const gatewayMessage = payment.data?.gateway_response?.data?.message || '';
+      
+      let userFriendlyMessage = "Payment initiation failed";
+      
+      if (
+        errorMessage.includes('Check users Balance') || 
+        errorMessage.includes('users Balance') ||
+        gatewayError.includes('Check users Balance') ||
+        gatewayMessage.includes('Check users Balance') ||
+        gatewayMessage.includes('Balance')
+      ) {
+        userFriendlyMessage = "Ntamafranga ufite ahagije. Ongera amafranga wishyure!";
+      } else if (gatewayMessage) {
+        userFriendlyMessage = gatewayMessage;
+      }
+      
+      return res.status(400).json({
+        success: false,
+        message: userFriendlyMessage,
+        error: payment.error,
+        details: {
+          amount: finalAmount,
+          currency: finalCurrency,
+          userMessage: userFriendlyMessage,
+          technicalError: payment.error
+        }
+      });
+    }
+
     if (payment.success) {
       const gatewayStatus = payment.data?.gateway_response?.data?.status;
       const isGatewaySuccessful = gatewayStatus === "SUCCESSFUL";
@@ -1062,7 +1128,7 @@ if (isGatewaySuccessful) {
           }),
           transactionId: newPayment.id,
           paymentMethod: 'Mobile Money',
-          moviePosterUrl:clearUrl(series.poster) || 'https://images.unsplash.com/photo-1489599809516-9827b6d1cf13?auto=format&fit=crop&w=600&q=80',
+          moviePosterUrl:getDirectB2Url(series.poster) || 'https://images.unsplash.com/photo-1489599809516-9827b6d1cf13?auto=format&fit=crop&w=600&q=80',
           downloadLink: null, // Series typically don't have bulk download
           watchLink: `${process.env.FRONTEND_URL || 'https://cinemarwa.com'}/series/${seriesId}?token=${newPayment.id}`,
           supportEmail: process.env.SUPPORT_EMAIL || 'support@cinemarwa.com'
@@ -1998,7 +2064,7 @@ export const getPaymentStatus = async (req, res) => {
     const metadata = payment.metadata || {};
 
     // Normalize movie poster URL for clients
-    const movieData = payment.movie ? { ...payment.movie.toJSON(), poster: clearUrl(payment.movie.poster) } : null;
+    const movieData = payment.movie ? { ...payment.movie.toJSON(), poster: getDirectB2Url(payment.movie.poster) } : null;
 
     res.status(200).json({
       success: true,
@@ -2059,7 +2125,7 @@ export const getUserPayments = async (req, res) => {
     // Normalize movie posters in payments
     const paymentsData = payments.map(p => {
       const pj = p.toJSON();
-      if (pj.movie && pj.movie.poster) pj.movie.poster = clearUrl(pj.movie.poster);
+      if (pj.movie && pj.movie.poster) pj.movie.poster = getDirectB2Url(pj.movie.poster);
       return pj;
     });
 
@@ -3220,8 +3286,8 @@ export const getSeriesPricing = async (req, res) => {
         id: series.id,
         title: series.title,
         overview: series.overview,
-        poster: clearUrl(series.poster),
-        backdrop: clearUrl(series.backdrop),
+        poster: getDirectB2Url(series.poster),
+        backdrop: getDirectB2Url(series.backdrop),
         totalEpisodes: episodes.length,
         totalSeasons: series.totalSeasons,
       },

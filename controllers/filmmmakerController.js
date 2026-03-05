@@ -1,7 +1,7 @@
 import User from "../models/User.modal.js";
 import Movie from "../models/Movie.model.js";
 import Payment from "../models/Payment.model.js";
-import { clearUrl } from "../utils/backblazeB2.js";
+import { getDirectB2Url } from "../utils/backblazeB2.js";
 import Joi from "joi";
 import { Op } from "sequelize";
 
@@ -1258,8 +1258,8 @@ export const getFilmmmakerMovies = async (req, res) => {
         slug: item.slug,
         description: item.description || item.overview,
         overview: item.overview || item.description,
-        poster: clearUrl(item.poster),
-        backdrop: clearUrl(item.backdrop),
+        poster: getDirectB2Url(item.poster),
+        backdrop: getDirectB2Url(item.backdrop),
         status: item.status,
         totalViews: safeParseNumber(item.totalViews),
         videoDuration: safeParseNumber(item.videoDuration),

@@ -2,7 +2,7 @@
 import { DataTypes } from 'sequelize';
 import sequelize from '../config/database.js';
 
-const Share = sequelize.define('Share', {
+const Share = sequelize.define('share', {
   id: {
     type: DataTypes.INTEGER,
     primaryKey: true,

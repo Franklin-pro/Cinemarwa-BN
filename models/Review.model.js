@@ -1,7 +1,7 @@
 import { DataTypes } from 'sequelize';
 import sequelize from '../config/database.js';
 
-const Review = sequelize.define('Review', {
+const Review = sequelize.define('review', {
     id: {
         type: DataTypes.UUID,
         defaultValue: DataTypes.UUIDV4,

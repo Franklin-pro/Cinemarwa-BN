@@ -1,7 +1,7 @@
 import Movie from "../models/Movie.model.js";
 import UserAccess from "../models/userAccess.model.js";
 import slugify from "slugify";
-import { uploadToB2, deleteFromB2, clearUrl } from "../utils/backblazeB2.js"; 
+import { uploadToB2, deleteFromB2, getDirectB2Url } from "../utils/backblazeB2.js"; 
 import { Op } from "sequelize";
 
 // Helper function to calculate expiry date
@@ -136,7 +136,7 @@ export const createSeries = async (req, res) => {
             mimeType: posterFile.mimetype,
           }
         );
-        console.log('✅ Poster uploaded:', posterUploadResult.secure_url);
+        console.log('✅ Poster uploaded:', posterUploadResult.directUrl);
       }
 
       if (req.files.backdropFile && req.files.backdropFile[0]) {
@@ -151,7 +151,7 @@ export const createSeries = async (req, res) => {
             mimeType: backdropFile.mimetype,
           }
         );
-        console.log('✅ Backdrop uploaded:', backdropUploadResult.secure_url);
+        console.log('✅ Backdrop uploaded:', backdropUploadResult.directUrl);
       }
     }
 
@@ -186,14 +186,14 @@ export const createSeries = async (req, res) => {
       
       // Images
       ...(posterUploadResult && {
-        poster: posterUploadResult.secure_url,
-        poster_path: posterUploadResult.secure_url,
+        poster: posterUploadResult.directUrl,
+        poster_path: posterUploadResult.directUrl,
         posterPublicId: posterUploadResult.public_id,
       }),
       
       ...(backdropUploadResult && {
-        backdrop: backdropUploadResult.secure_url,
-        backdrop_path: backdropUploadResult.secure_url,
+        backdrop: backdropUploadResult.directUrl,
+        backdrop_path: backdropUploadResult.directUrl,
         backdropPublicId: backdropUploadResult.public_id,
       }),
       
@@ -222,8 +222,8 @@ export const createSeries = async (req, res) => {
           accessPeriod: series.accessPeriod,
           pricingTiers: series.pricingTiers,
           releaseSchedule: series.releaseSchedule,
-          poster: clearUrl(series.poster),
-          backdrop: clearUrl(series.backdrop),
+          poster: getDirectB2Url(series.poster),
+          backdrop: getDirectB2Url(series.backdrop),
           status: series.status,
         },
       },
@@ -397,12 +397,12 @@ export const addEpisode = async (req, res) => {
       fileSize: Math.round(videoFile.size / (1024 * 1024)),
       
       // Images
-      poster: posterUploadResult.secure_url,
-      poster_path: posterUploadResult.secure_url,
+      poster: posterUploadResult.directUrl,
+      poster_path: posterUploadResult.directUrl,
       posterPublicId: posterUploadResult.public_id,
       ...(backdropUploadResult && {
-        backdrop: backdropUploadResult.secure_url,
-        backdrop_path: backdropUploadResult.secure_url,
+        backdrop: backdropUploadResult.directUrl,
+        backdrop_path: backdropUploadResult.directUrl,
         backdropPublicId: backdropUploadResult.public_id,
       }),
       
@@ -470,8 +470,8 @@ export const addEpisode = async (req, res) => {
           viewPrice: episode.viewPrice,
           accessPeriod: episode.accessPeriod,
           pricingTiers: episode.pricingTiers,
-          poster: clearUrl(episode.poster),
-          videoUrl: clearUrl(episode.videoUrl),
+          poster: getDirectB2Url(episode.poster),
+          videoUrl: getDirectB2Url(episode.videoUrl),
           videoDuration: episode.videoDuration,
           status: episode.status,
         },
@@ -560,8 +560,8 @@ export const getSeriesEpisodes = async (req, res) => {
           id: series.id,
           title: series.title,
           overview: series.overview,
-          poster: clearUrl(series.poster),
-          backdrop: clearUrl(series.backdrop),
+          poster: getDirectB2Url(series.poster),
+          backdrop: getDirectB2Url(series.backdrop),
           totalSeasons: Object.keys(seasons).length,
           totalEpisodes: count,
           viewPrice: series.viewPrice,
@@ -1119,7 +1119,7 @@ export const getUserSeriesAccess = async (req, res) => {
           id: access.id,
           seriesId: access.seriesId,
           seriesTitle: access.series?.title,
-          seriesPoster: clearUrl(access.series?.poster),
+          seriesPoster: getDirectB2Url(access.series?.poster),
           accessPeriod: access.accessPeriod,
           accessPeriodLabel: getAccessPeriodLabel(access.accessPeriod),
           pricePaid: access.pricePaid,
@@ -1219,7 +1219,7 @@ export const getSeriesPricing = async (req, res) => {
           id: series.id,
           title: series.title,
           overview: series.overview,
-          poster: clearUrl(series.poster),
+          poster: getDirectB2Url(series.poster),
           totalEpisodes: episodes.length,
           totalSeasons: series.totalSeasons,
           currency: series.currency || "RWF",

@@ -31,6 +31,18 @@ app.use(cors());
 app.use(bodyParser.json({ limit: "50mb" }));
 app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
 
+// CSP headers for Google OAuth
+app.use((req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; " +
+    "script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com; " +
+    "frame-src 'self' https://accounts.google.com; " +
+    "connect-src 'self' https://accounts.google.com https://www.googleapis.com;"
+  );
+  next();
+});
+
 // Note: Session and Passport middleware will be initialized in startServer()
 
 // Health check endpoint
