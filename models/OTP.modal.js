@@ -1,7 +1,7 @@
 import { DataTypes } from 'sequelize';
 import sequelize from '../config/database.js';
 
-const OTP = sequelize.define('OTP', {
+const OTP = sequelize.define('otp', {
     id: {
         type: DataTypes.UUID,
         defaultValue: DataTypes.UUIDV4,

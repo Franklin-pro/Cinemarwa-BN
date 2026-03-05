@@ -4,7 +4,7 @@ import User from "./User.modal.js";
 import Movie from "./Movie.model.js";
 
 
-const MovieRating = sequelize.define('movieRating', {
+const MovieRating = sequelize.define('movierating', {
     id: {
         type: DataTypes.INTEGER,
         primaryKey: true,

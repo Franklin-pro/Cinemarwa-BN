@@ -4,6 +4,8 @@ import Payment from "../models/Payment.model.js";
 import Review from "../models/Review.model.js";
 import Joi from "joi";
 import { Op } from "sequelize";
+import sequelize from "../config/database.js";
+import os from 'os';
 
 // ====== VALIDATION SCHEMAS ======
 
@@ -1640,6 +1642,194 @@ export const recentAdminActivities = async (req, res) => {
       success: false,
       message: "Server error", 
       error: error.message 
+    });
+  }
+};
+
+
+
+export const systemHealth = async (req, res) => {
+  const startTime = Date.now();
+  const healthChecks = {
+    timestamp: new Date().toISOString(),
+    status: 'healthy',
+    checks: {},
+    system: {},
+    performance: {}
+  };
+
+  try {
+    // Database Health Check
+    try {
+      const dbStart = Date.now();
+      await sequelize.authenticate();
+      const dbTime = Date.now() - dbStart;
+      
+      // Get database stats
+      const [results] = await sequelize.query('SELECT 1 as health');
+      
+      healthChecks.checks.database = {
+        status: 'healthy',
+        responseTime: `${dbTime}ms`,
+        connected: true,
+        dialect: sequelize.getDialect(),
+        pool: {
+          max: sequelize.config.pool?.max || 'N/A',
+          min: sequelize.config.pool?.min || 'N/A',
+          idle: sequelize.config.pool?.idle || 'N/A',
+          acquire: sequelize.config.pool?.acquire || 'N/A'
+        }
+      };
+    } catch (dbError) {
+      healthChecks.checks.database = {
+        status: 'unhealthy',
+        error: dbError.message,
+        connected: false
+      };
+      healthChecks.status = 'degraded';
+    }
+
+    // Memory Health Check
+    const memUsage = process.memoryUsage();
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const memUsagePercent = ((totalMem - freeMem) / totalMem * 100).toFixed(2);
+
+    healthChecks.system.memory = {
+      status: memUsagePercent < 90 ? 'healthy' : 'warning',
+      process: {
+        rss: `${(memUsage.rss / 1024 / 1024).toFixed(2)} MB`,
+        heapTotal: `${(memUsage.heapTotal / 1024 / 1024).toFixed(2)} MB`,
+        heapUsed: `${(memUsage.heapUsed / 1024 / 1024).toFixed(2)} MB`,
+        external: `${(memUsage.external / 1024 / 1024).toFixed(2)} MB`
+      },
+      system: {
+        total: `${(totalMem / 1024 / 1024 / 1024).toFixed(2)} GB`,
+        free: `${(freeMem / 1024 / 1024 / 1024).toFixed(2)} GB`,
+        used: `${memUsagePercent}%`
+      }
+    };
+
+    // CPU Health Check
+    const cpus = os.cpus();
+    const loadAvg = os.loadavg();
+    
+    healthChecks.system.cpu = {
+      status: 'healthy',
+      cores: cpus.length,
+      model: cpus[0]?.model || 'Unknown',
+      loadAverage: {
+        '1min': loadAvg[0].toFixed(2),
+        '5min': loadAvg[1].toFixed(2),
+        '15min': loadAvg[2].toFixed(2)
+      }
+    };
+
+    // Uptime Check
+    const processUptime = process.uptime();
+    const systemUptime = os.uptime();
+    
+    healthChecks.system.uptime = {
+      process: formatUptime(processUptime),
+      system: formatUptime(systemUptime),
+      processSeconds: Math.floor(processUptime),
+      systemSeconds: Math.floor(systemUptime)
+    };
+
+    // Environment Check
+    healthChecks.system.environment = {
+      nodeVersion: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      env: process.env.NODE_ENV || 'development',
+      pid: process.pid
+    };
+
+    // Disk Space Check (if available)
+    try {
+      const homeDir = os.homedir();
+      healthChecks.system.disk = {
+        status: 'healthy',
+        homeDir: homeDir
+      };
+    } catch (diskError) {
+      healthChecks.system.disk = {
+        status: 'unknown',
+        error: 'Unable to check disk space'
+      };
+    }
+
+    // Response Time
+    healthChecks.performance.responseTime = `${Date.now() - startTime}ms`;
+
+    // External Services Check (Add your own services)
+    // Example: Redis, External APIs, etc.
+    healthChecks.checks.externalServices = {
+      status: 'not_configured',
+      message: 'Add external service checks as needed'
+    };
+
+    // Overall Status Determination
+    const hasUnhealthy = Object.values(healthChecks.checks).some(
+      check => check.status === 'unhealthy'
+    );
+    
+    if (hasUnhealthy) {
+      healthChecks.status = 'unhealthy';
+    }
+
+    // Return appropriate status code
+    const statusCode = healthChecks.status === 'healthy' ? 200 : 
+                       healthChecks.status === 'degraded' ? 207 : 503;
+
+    res.status(statusCode).json({
+      success: healthChecks.status !== 'unhealthy',
+      ...healthChecks
+    });
+
+  } catch (error) {
+    console.error("System health check failed:", error);
+    res.status(503).json({
+      success: false,
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      error: error.message,
+      performance: {
+        responseTime: `${Date.now() - startTime}ms`
+      }
+    });
+  }
+};
+
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  const parts = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (secs > 0 || parts.length === 0) parts.push(`${secs}s`);
+  
+  return parts.join(' ');
+}
+
+export const healthCheck = async (req, res) => {
+  try {
+    await sequelize.authenticate();
+    res.status(200).json({
+      success: true,
+      status: 'healthy',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(503).json({
+      success: false,
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      error: error.message
     });
   }
 };

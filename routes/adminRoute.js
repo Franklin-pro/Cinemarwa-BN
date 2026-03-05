@@ -16,6 +16,7 @@ import {
   getPaymentReconciliation,
   getFilmmakersPerformance,
   recentAdminActivities,
+  systemHealth,
 } from "../controllers/adminDashboardController.js";
 import {
   authenticateToken,
@@ -92,6 +93,8 @@ router.patch(
   checkNotBlocked,
   blockUser
 );
+
+router.get('/system/health', authenticateToken, requireAdmin, systemHealth);
 
 // Unblock user account
 // PATCH /admin/users/:userId/unblock

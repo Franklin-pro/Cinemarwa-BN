@@ -2,7 +2,7 @@ import { DataTypes } from "sequelize";
 import sequelize from "../config/database.js";
 
 const UserAccess = sequelize.define(
-  "UserAccess",
+  "useraccess",
   {
     id: {
       type: DataTypes.UUID,
@@ -13,7 +13,7 @@ const UserAccess = sequelize.define(
       type: DataTypes.UUID,
       allowNull: false,
       references: {
-        model: 'Users',
+        model: 'users',
         key: 'id'
       }
     },
@@ -21,7 +21,7 @@ const UserAccess = sequelize.define(
       type: DataTypes.UUID,
       allowNull: false,
       references: {
-        model: 'Movies',
+        model: 'movies',
         key: 'id'
       }
     },
@@ -30,7 +30,7 @@ const UserAccess = sequelize.define(
       type: DataTypes.UUID,
       allowNull: true,
       references: {
-        model: 'Movies',
+        model: 'movies',
         key: 'id'
       }
     },

@@ -2,7 +2,7 @@ import { DataTypes } from "sequelize";
 import sequelize from "../config/database.js";
 
 const Subscribe = sequelize.define(
-    "Subscribe",
+    "subscribe",
     {
         id: {
             type: DataTypes.INTEGER,
@@ -28,7 +28,7 @@ const Subscribe = sequelize.define(
         },
     },
     {
-        tableName: "subscribe",
+        tableName: "subscribes",
         timestamps: false,
     }
 );

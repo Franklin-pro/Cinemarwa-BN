@@ -4,7 +4,7 @@ import Review from "../models/Review.model.js";
 import User from "../models/User.modal.js";
 import Share from "../models/share.model.js";
 import slugify from "slugify";
-import { uploadToB2, deleteFromB2, clearUrl, getBunnyCDNUrl, getStreamingUrls } from "../utils/backblazeB2.js"; 
+import { uploadToB2, deleteFromB2, getDirectB2Url, getStreamingUrls } from "../utils/backblazeB2.js"; 
 import { Op } from "sequelize";
 import sequelize from "../config/database.js";
 
@@ -276,7 +276,7 @@ export const addMovie = async (req, res) => {
       if (contentType !== "series" && videoFile && videoFile[0]) {
         videoUploadResult = await uploadToB2(
           videoFile[0].buffer,
-          videoFile[0].originalname,
+          videoFile[0].originalname || "video",
           {
             folder: contentType === "episode" ? "series/videos" : "movies/videos",
             resource_type: "video",
@@ -288,7 +288,7 @@ export const addMovie = async (req, res) => {
       if (posterFile && posterFile[0]) {
         posterUploadResult = await uploadToB2(
           posterFile[0].buffer,
-          posterFile[0].originalname,
+          posterFile[0].originalname || `${titleStr.trim()}-poster`,
           {
             folder: contentType === "episode" ? "series/posters" : 
                     contentType === "series" ? "series/posters" : "movies/posters",
@@ -301,7 +301,7 @@ export const addMovie = async (req, res) => {
       if (backdropFile && backdropFile[0]) {
         backdropUploadResult = await uploadToB2(
           backdropFile[0].buffer,
-          backdropFile[0].originalname,
+          backdropFile[0].originalname || `${titleStr.trim()}-backdrop`,
           {
             folder: contentType === "episode" ? "series/backdrops" : 
                     contentType === "series" ? "series/backdrops" : "movies/backdrops",
@@ -392,12 +392,12 @@ export const addMovie = async (req, res) => {
       }),
       
       ...(posterUploadResult && {
-        poster: posterUploadResult.secure_url,
+        poster: posterUploadResult.directUrl,
         posterPublicId: posterUploadResult.public_id,
       }),
       
       ...(backdropUploadResult && {
-        backdrop: backdropUploadResult.secure_url,
+        backdrop: backdropUploadResult.directUrl,
         backdropPublicId: backdropUploadResult.public_id,
       }),
       
@@ -450,8 +450,8 @@ export const addMovie = async (req, res) => {
       slug: newContent.slug,
       contentType: newContent.contentType,
       status: newContent.status,
-      poster: clearUrl(newContent.poster),
-      backdrop: clearUrl(newContent.backdrop),
+      poster: getDirectB2Url(newContent.poster),
+      backdrop: getDirectB2Url(newContent.backdrop),
       viewPrice: newContent.viewPrice,
       downloadPrice: newContent.downloadPrice,
       currency: newContent.currency,
@@ -477,7 +477,11 @@ export const addMovie = async (req, res) => {
                contentType === "episode" ? "Episode uploaded successfully!" : 
                "Movie uploaded successfully! Awaiting admin approval.",
       data: {
-        content: responseData,
+        content: {
+          ...responseData,
+          poster: getDirectB2Url(responseData.poster),
+          backdrop: getDirectB2Url(responseData.backdrop),
+        },
       },
     });
   } catch (error) {
@@ -684,8 +688,8 @@ export const getAllMovies = async (req, res) => {
         contentType: movie.contentType,
         description: movie.description,
         overview: movie.description,
-        poster: clearUrl(movie.poster),
-        backdrop: clearUrl(movie.backdrop),
+        poster: getDirectB2Url(movie.poster),
+        backdrop: getDirectB2Url(movie.backdrop),
         viewPrice: movie.viewPrice,
         downloadPrice: movie.downloadPrice,
         currency: movie.currency,
@@ -960,12 +964,12 @@ export const getMovieById = async (req, res) => {
       ...additionalData
     };
 
-    // Normalize URLs to use Bunny CDN
-    responseData.poster = clearUrl(responseData.poster);
-    responseData.backdrop = clearUrl(responseData.backdrop);
-    responseData.videoUrl = getBunnyCDNUrl(responseData.videoUrl);
-    responseData.streamingUrl = getBunnyCDNUrl(responseData.streamingUrl);
-    responseData.hlsUrl = getBunnyCDNUrl(responseData.hlsUrl);
+    // Use Direct B2 URLs
+    responseData.poster = getDirectB2Url(responseData.poster);
+    responseData.backdrop = getDirectB2Url(responseData.backdrop);
+    responseData.videoUrl = getDirectB2Url(responseData.videoUrl);
+    responseData.streamingUrl = getDirectB2Url(responseData.streamingUrl);
+    responseData.hlsUrl = getDirectB2Url(responseData.hlsUrl);
 
     res.status(200).json({
       success: true,
@@ -1227,11 +1231,11 @@ export const searchMovies = async (req, res) => {
 
     const normalizedMovies = movies.map(movie => ({
       ...movie.toJSON(),
-      poster: getBunnyCDNUrl(movie.poster),
-      backdrop: getBunnyCDNUrl(movie.backdrop),
-      streamingUrl: getBunnyCDNUrl(movie.streamingUrl),
-      videoUrl: getBunnyCDNUrl(movie.videoUrl),
-      hlsUrl: getBunnyCDNUrl(movie.hlsUrl),
+      poster: getDirectB2Url(movie.poster),
+      backdrop: getDirectB2Url(movie.backdrop),
+      streamingUrl: getDirectB2Url(movie.streamingUrl),
+      videoUrl: getDirectB2Url(movie.videoUrl),
+      hlsUrl: getDirectB2Url(movie.hlsUrl),
     }));
 
     res.status(200).json({
@@ -1614,9 +1618,9 @@ export const uploadMovieVideo = async (req, res) => {
         id: movie.id,
         title: movie.title,
         contentType: movie.contentType,
-        streamingUrl: getBunnyCDNUrl(movie.streamingUrl),
-        videoUrl: getBunnyCDNUrl(movie.videoUrl),
-        hlsUrl: getBunnyCDNUrl(movie.hlsUrl),
+        streamingUrl: getDirectB2Url(movie.streamingUrl),
+        videoUrl: getDirectB2Url(movie.videoUrl),
+        hlsUrl: getDirectB2Url(movie.hlsUrl),
         duration: movie.videoDuration,
         quality: movie.videoQuality,
         processingStatus: movie.processingStatus,
@@ -1674,7 +1678,7 @@ export const uploadPoster = async (req, res) => {
     });
 
     await movie.update({
-      poster: uploadResult.secure_url,
+      poster: uploadResult.directUrl,
       posterPublicId: uploadResult.public_id,
     });
 
@@ -1682,7 +1686,7 @@ export const uploadPoster = async (req, res) => {
       success: true,
       message: "Poster uploaded successfully",
       data: {
-        posterUrl: getBunnyCDNUrl(movie.poster),
+        posterUrl: uploadResult.directUrl,
       },
     });
   } catch (error) {
@@ -1737,7 +1741,7 @@ export const uploadBackdrop = async (req, res) => {
     });
 
     await movie.update({
-      backdrop: uploadResult.secure_url,
+      backdrop: uploadResult.directUrl,
       backdropPublicId: uploadResult.public_id,
     });
 
@@ -1745,7 +1749,7 @@ export const uploadBackdrop = async (req, res) => {
       success: true,
       message: "Backdrop uploaded successfully",
       data: {
-        backdropUrl: getBunnyCDNUrl(movie.backdrop),
+        backdropUrl: uploadResult.directUrl,
       },
     });
   } catch (error) {

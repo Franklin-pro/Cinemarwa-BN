@@ -73,6 +73,7 @@ router.post(
   uploadMovieFilesMiddleware(),
   addMovie
 );
+
 router.post("/:filmmakerId/series", authenticateToken, createSeries);
 router.post("/:filmmakerId/series/:seriesId/add-episode", authenticateToken, addEpisode);
 router.post("/rating", authenticateToken,addRatingMovies);
